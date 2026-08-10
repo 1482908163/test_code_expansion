@@ -2,7 +2,10 @@ SET(CMAKE_C_COMPILER mpicc)
 SET(CMAKE_CXX_COMPILER mpicxx)
 PROJECT(HPDS_test)
 
-SET(CMAKE_INSTALL_PREFIX /vol8/home/hnu_lhz/cjz/NETGEN/install)
+IF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    SET(CMAKE_INSTALL_PREFIX /vol8/home/hnu_lhz/cjz/NETGEN/install
+        CACHE PATH "Default installation directory" FORCE)
+ENDIF()
 
 add_definitions("-g")
 add_definitions("-O3")
@@ -66,4 +69,3 @@ INCLUDE_DIRECTORIES(${NG_INCLUDE_DIR}  ${OpenCASCADE_INCLUDE_DIR} ${METIS_INCLUD
 
 ADD_SUBDIRECTORY(mesh_occ_mpi )
 ADD_SUBDIRECTORY(merge_mesh )
-
