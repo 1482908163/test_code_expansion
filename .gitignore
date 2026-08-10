@@ -3,10 +3,14 @@ result/
 inputData/
 err/
 *.sh
+!strong_scaling/*.sh
 *.o
+*.pyc
+__pycache__/
 *.so
 *.a
 *.exe
 *.log
 *.tmp
 .vscode/
+strong_scaling_results/
