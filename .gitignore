@@ -1,0 +1,11 @@
+build/
+result/
+inputData/
+err/
+*.o
+*.so
+*.a
+*.exe
+*.log
+*.tmp
+.vscode/
