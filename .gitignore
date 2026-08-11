@@ -11,4 +11,4 @@ __pycache__/
 *.log
 *.tmp
 .vscode/
-
+strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928/application_output/

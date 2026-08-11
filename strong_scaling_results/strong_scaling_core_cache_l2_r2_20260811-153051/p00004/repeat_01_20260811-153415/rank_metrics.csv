@@ -1,0 +1,5 @@
+rank,host,total_wall_seconds,coarse_points,coarse_surface_elements,coarse_volume_elements,facemap_entries,physical_boundary_faces,partition_boundary_faces,local_points_before_adjacency,local_surface_elements_before_adjacency,local_volume_elements_before_adjacency,shared_vertices,adjacent_processes,vertex_send_items,vertex_receive_items,volume_send_items,volume_receive_items,local_points_after_adjacency,local_surface_elements_after_adjacency,local_volume_elements_after_adjacency,peak_rss_mib,hardware_cache_available,process_io_available
+0,cn4550,196.805400002,8067,12694,26411,12867,12694,173,2390769,788992,13180416,12482,2,12482,0,24504,24378,2401263,788992,13204794,3271.01171875,1,1
+1,cn4551,196.144821336,8067,12694,26411,12867,12694,173,2243553,932864,12032256,11410,2,5177,6233,22212,22374,2253198,932864,12054630,3289.8515625,1,1
+2,cn4552,195.318166684,8067,12694,26411,12867,12694,173,2073153,787968,11232768,10506,2,5329,5177,20410,20387,2082088,787968,11253155,3248.19921875,1,1
+3,cn4553,197.093331689,8067,12694,26411,12867,12694,173,3032605,828416,16995712,11578,2,0,11578,22553,22540,3042253,828416,17018252,5856.2109375,1,1

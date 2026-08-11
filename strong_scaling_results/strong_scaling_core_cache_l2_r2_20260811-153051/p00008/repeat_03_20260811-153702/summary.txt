@@ -1,0 +1,69 @@
+Strong Scaling Profile (强扩展分析)
+============================================================
+Experiment (实验): strong_scaling_core_cache_l2_r2_20260811-153051
+Processes (进程数): 8
+Repeat (重复编号): 3
+Mode (模式): core-only (仅核心算法)
+End-to-end max time (端到端最大时间): 118.520483 s
+Profile coverage (阶段计时覆盖率): 99.156764%
+Communication fraction (通信占比, avg/max): 11.407266% / 20.431292%
+I/O max fraction (最大 I/O 占比): 1.502433%
+Process I/O counters (/proc/self/io): available on 8.000000/8 ranks
+Peak RSS max (最大常驻内存): 1733.832031 MiB
+Local volume imbalance max/avg (体单元负载不均衡): 1.316712
+Hardware cache miss rate (硬件缓存未命中率): 2.552989%
+IPC (每周期指令数): 0.650809
+Logical I/O read/write (逻辑读/写): 7.897798 / 0.000000 MiB
+Physical I/O read/write (实际存储读/写): 0.000000 / 0.000000 MiB
+
+Category Breakdown (分类汇总)
+Category                                Avg(s)        Max(s)       Max/Avg
+--------------------------------------------------------------------------
+setup(初始化)                     22.825961     23.107510      1.012335
+compute(计算)                      78.573108     91.685634      1.166883
+communication(通信)                13.396534     24.202366      1.806614
+synchronization(同步等待)         0.011571      0.021826      1.886218
+io(输入输出)                      1.741735      1.780691      1.022366
+postprocess(后处理)                0.000000      0.000000      0.000000
+unprofiled(未细分)                 0.991140      1.104324      1.114196
+
+Stage Breakdown (阶段明细，按最大时间降序)
+Stage                         Category               Avg(s)     Max(s)       M/A     Miss(%)     SendMiB     RecvMiB
+--------------------------------------------------------------------------------------------------------------------
+local_volume_mesh             compute             67.169675  79.729117  1.186981    2.697154    0.000000    0.000000
+vertex_count_allgather        communication       12.976717  23.282166  1.794149    1.808198    0.000031    0.000244
+coarse_volume_mesh            setup               14.218716  14.478030  1.018238    2.437532    0.000000    0.000000
+volume_refine                 compute              7.474632   9.075087  1.214118    2.762105    0.000000    0.000000
+coarse_surface_mesh           setup                8.139339   8.216895  1.009529    2.879929    0.000000    0.000000
+volume_exchange_pack          compute              1.876428   2.306186  1.229030    2.611517    0.000000    0.000000
+volume_exchange_unpack        compute              1.527546   2.223939  1.455890    2.649030    0.000000    0.000000
+geometry_load                 io                   1.741735   1.780691  1.022366    1.800064    0.000000    0.000000
+volume_size_exchange          communication        0.242624   0.553443  2.281075    2.614100    0.000061    0.000061
+coarse_local_size             setup                0.455279   0.459822  1.009978    2.341703    0.000000    0.000000
+volume_payload_exchange       communication        0.114704   0.302222  2.634796    2.628464   29.708977   29.708977
+face_local_extract            compute              0.159834   0.166422  1.041213    2.451691    0.000000    0.000000
+metis_partition               compute              0.113694   0.125580  1.104542    2.530844    0.000000    0.000000
+surface_refine                compute              0.073332   0.084542  1.152874    2.441902    0.000000    0.000000
+vertex_numbering_local        compute              0.068065   0.082645  1.214204    2.640962    0.000000    0.000000
+face_global_merge             compute              0.075868   0.079634  1.049635    2.446806    0.000000    0.000000
+face_allgatherv               communication        0.056076   0.056304  1.004062    2.375297    4.634499   37.075989
+part_face_create              compute              0.020298   0.022009  1.084259    2.437444    0.000000    0.000000
+face_pre_collective_wait      synchronization      0.011571   0.021826  1.886218    2.427021    0.000000    0.000000
+coarse_edge_mesh              setup                0.012498   0.012653  1.012347    2.645775    0.000000    0.000000
+vertex_exchange_unpack        compute              0.002846   0.008694  3.054748    2.640774    0.000000    0.000000
+vertex_exchange               communication        0.005526   0.008585  1.553711    2.640159    1.397219    1.397219
+face_map_setup                compute              0.007009   0.008091  1.154245    2.435399    0.000000    0.000000
+adjacency_build               compute              0.003333   0.003679  1.103960    2.640871    0.000000    0.000000
+element_count_allgather       communication        0.000887   0.001655  1.865349    2.640722    0.000031    0.000244
+volume_payload_prepare        compute              0.000326   0.000785  2.408484    2.640806    0.000000    0.000000
+vertex_exchange_prepare       compute              0.000103   0.000297  2.877149    2.640806    0.000000    0.000000
+submesh_initialization        setup                0.000127   0.000150  1.178345    2.435613    0.000000    0.000000
+face_collective_setup         compute              0.000118   0.000125  1.054674    2.435573    0.000000    0.000000
+
+Files (文件说明)
+  summary.txt       人工阅读摘要
+  run_summary.csv   单次运行总指标
+  stages.csv        按阶段聚合指标
+  rank_stages.csv   各进程逐阶段原始指标
+  rank_metrics.csv  各进程网格规模与内存指标
+  metadata.txt      命令、平台和参数信息

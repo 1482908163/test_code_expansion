@@ -1,0 +1,153 @@
+[ENV-OK] libmpi=/vol8/appsoftware/mpi-x/lib/libmpi.so.12
+[ENV-OK] libpmix=/usr/lib/libpmix.so.2
+============================================================
+Strong scaling (强扩展) run: strong_scaling_full_io_l2_r2_20260811-160928
+Processes: 4; repeats: 3
+Result directory: /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928
+Environment: /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928/environment/job_5932601_20260811-160930_159973.txt
+============================================================
+[RUN] processes=4 nodes=4 repeat=1/3
+========参数========
+使用核数 : 4
+输出文件目录 : /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928/application_output/p00004/repeat_01/
+输入文件目录 : /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+细化等级 : 2
+细化次数 : 2
+网格最大值:1000
+网格最小值:0
+强扩展分析 : 开启
+分析结果目录 : /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results
+实验名称 : strong_scaling_full_io_l2_r2_20260811-160928
+重复编号 : 1
+仅核心算法 : 否
+硬件缓存计数 : 关闭
+Successfully loaded STEP File: /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+Setting Local Mesh size.....
+OCC Mesh Pointer before call = 0x15e9d50
+Local Mesh size successfully set.....
+OCC Mesh Pointer after call = 0x15e9d50
+Creating Edge Mesh.....
+Edge Mesh successfully created.....
+Number of points = 3031
+Creating Surface Mesh.....
+Surface Mesh successfully created.....
+Number of points = 6347
+Number of surface elements = 12694
+Creating Volume Mesh.....
+Volume Mesh successfully created.....
+Number of points = 8067
+Number of volume elements = 26411
+Generate Coarse Mesh Done...
+id0 sum runtime is :0s
+meshing done 
+start com_barycoords, id: 0
+start com_baryVolumeElements, id: 0
+createElmerOutput, id: 0
+successful!!!
+[PROFILE] results written to /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928/p00004/repeat_01_20260811-161816
+start com_barycoords, id: 2
+start com_baryVolumeElements, id: 2
+createElmerOutput, id: 2
+start com_barycoords, id: 3
+start com_baryVolumeElements, id: 3
+createElmerOutput, id: 3
+start com_barycoords, id: 1
+start com_baryVolumeElements, id: 1
+createElmerOutput, id: 1
+[RUN] processes=4 nodes=4 repeat=2/3
+========参数========
+使用核数 : 4
+输出文件目录 : /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928/application_output/p00004/repeat_02/
+输入文件目录 : /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+细化等级 : 2
+细化次数 : 2
+网格最大值:1000
+网格最小值:0
+强扩展分析 : 开启
+分析结果目录 : /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results
+实验名称 : strong_scaling_full_io_l2_r2_20260811-160928
+重复编号 : 2
+仅核心算法 : 否
+硬件缓存计数 : 关闭
+Successfully loaded STEP File: /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+Setting Local Mesh size.....
+OCC Mesh Pointer before call = 0x2c858070
+Local Mesh size successfully set.....
+OCC Mesh Pointer after call = 0x2c858070
+Creating Edge Mesh.....
+Edge Mesh successfully created.....
+Number of points = 3031
+Creating Surface Mesh.....
+Surface Mesh successfully created.....
+Number of points = 6347
+Number of surface elements = 12694
+Creating Volume Mesh.....
+Volume Mesh successfully created.....
+Number of points = 8067
+Number of volume elements = 26411
+Generate Coarse Mesh Done...
+id0 sum runtime is :1s
+meshing done 
+start com_barycoords, id: 0
+start com_baryVolumeElements, id: 0
+createElmerOutput, id: 0
+successful!!!
+[PROFILE] results written to /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928/p00004/repeat_02_20260811-162709
+start com_barycoords, id: 2
+start com_baryVolumeElements, id: 2
+createElmerOutput, id: 2
+start com_barycoords, id: 3
+start com_baryVolumeElements, id: 3
+createElmerOutput, id: 3
+start com_barycoords, id: 1
+start com_baryVolumeElements, id: 1
+createElmerOutput, id: 1
+[RUN] processes=4 nodes=4 repeat=3/3
+========参数========
+使用核数 : 4
+输出文件目录 : /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928/application_output/p00004/repeat_03/
+输入文件目录 : /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+细化等级 : 2
+细化次数 : 2
+网格最大值:1000
+网格最小值:0
+强扩展分析 : 开启
+分析结果目录 : /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results
+实验名称 : strong_scaling_full_io_l2_r2_20260811-160928
+重复编号 : 3
+仅核心算法 : 否
+硬件缓存计数 : 关闭
+Successfully loaded STEP File: /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+Setting Local Mesh size.....
+OCC Mesh Pointer before call = 0x2ea26070
+Local Mesh size successfully set.....
+OCC Mesh Pointer after call = 0x2ea26070
+Creating Edge Mesh.....
+Edge Mesh successfully created.....
+Number of points = 3031
+Creating Surface Mesh.....
+Surface Mesh successfully created.....
+Number of points = 6347
+Number of surface elements = 12694
+Creating Volume Mesh.....
+Volume Mesh successfully created.....
+Number of points = 8067
+Number of volume elements = 26411
+Generate Coarse Mesh Done...
+id0 sum runtime is :1s
+meshing done 
+start com_barycoords, id: 0
+start com_baryVolumeElements, id: 0
+createElmerOutput, id: 0
+successful!!!
+[PROFILE] results written to /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928/p00004/repeat_03_20260811-163614
+start com_barycoords, id: 2
+start com_baryVolumeElements, id: 2
+createElmerOutput, id: 2
+start com_barycoords, id: 3
+start com_baryVolumeElements, id: 3
+createElmerOutput, id: 3
+start com_barycoords, id: 1
+start com_baryVolumeElements, id: 1
+createElmerOutput, id: 1
+[OK] 本作业运行完成；等待其他规模结束后统一分析: /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_full_io_l2_r2_20260811-160928

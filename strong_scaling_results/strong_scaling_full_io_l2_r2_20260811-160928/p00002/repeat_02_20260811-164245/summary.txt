@@ -1,0 +1,76 @@
+Strong Scaling Profile (强扩展分析)
+============================================================
+Experiment (实验): strong_scaling_full_io_l2_r2_20260811-160928
+Processes (进程数): 2
+Repeat (重复编号): 2
+Mode (模式): full (完整程序)
+End-to-end max time (端到端最大时间): 991.699344 s
+Profile coverage (阶段计时覆盖率): 96.598992%
+Communication fraction (通信占比, avg/max): 7.579043% / 11.319662%
+I/O max fraction (最大 I/O 占比): 49.952929%
+Process I/O counters (/proc/self/io): available on 2.000000/2 ranks
+Peak RSS max (最大常驻内存): 12411.160156 MiB
+Local volume imbalance max/avg (体单元负载不均衡): 1.123308
+Hardware cache counters (硬件缓存计数器): not requested (未请求)
+Logical I/O read/write (逻辑读/写): 1.975919 / 8084.292816 MiB
+Physical I/O read/write (实际存储读/写): 10.042969 / 8084.386719 MiB
+
+Category Breakdown (分类汇总)
+Category                                Avg(s)        Max(s)       Max/Avg
+--------------------------------------------------------------------------
+setup(初始化)                     23.325806     23.494666      1.007239
+compute(计算)                     310.597135    332.890355      1.071775
+communication(通信)                74.161792    112.223962      1.513232
+synchronization(同步等待)         0.016543      0.033057      1.998254
+io(输入输出)                    438.766366    495.382871      1.129036
+postprocess(后处理)               98.575294    111.191079      1.127981
+unprofiled(未细分)                33.286671     37.227162      1.118380
+
+Stage Breakdown (阶段明细，按最大时间降序)
+Stage                         Category               Avg(s)     Max(s)       M/A     Miss(%)     SendMiB     RecvMiB
+--------------------------------------------------------------------------------------------------------------------
+partition_result_io           io                 305.083416 346.433495  1.135537         N/A    0.000000    0.000000
+local_volume_mesh             compute            253.457611 281.722816  1.111518         N/A    0.000000    0.000000
+quality_evaluation            postprocess         98.575294 111.191079  1.127981         N/A    0.000000    0.000000
+volume_size_exchange          communication       46.220943  92.441806  1.999998         N/A    0.000008    0.000008
+final_mesh_save               io                  66.880226  75.318071  1.126164         N/A    0.000000    0.000000
+refined_volume_save           io                  64.231180  70.962074  1.104792         N/A    0.000000    0.000000
+volume_refine                 compute             37.389953  40.852347  1.092602         N/A    0.000000    0.000000
+vertex_count_allgather        communication       18.021783  36.043437  1.999993         N/A    0.000008    0.000015
+final_count_exchange          communication        9.844921  19.689779  1.999994         N/A    0.000004    0.000004
+coarse_volume_mesh            setup               14.274565  14.439722  1.011570         N/A    0.000000    0.000000
+volume_exchange_unpack        compute             10.609563  11.995461  1.130627         N/A    0.000000    0.000000
+volume_exchange_pack          compute              8.206998   9.274774  1.130105         N/A    0.000000    0.000000
+coarse_surface_mesh           setup                8.535591   8.826919  1.034131         N/A    0.000000    0.000000
+geometry_load                 io                   2.003173   2.229333  1.112901         N/A    0.000000    0.000000
+coarse_local_size             setup                0.501821   0.543160  1.082379         N/A    0.000000    0.000000
+refined_surface_save          io                   0.421431   0.432968  1.027375         N/A    0.000000    0.000000
+surface_refine                compute              0.280615   0.287092  1.023082         N/A    0.000000    0.000000
+coarse_mesh_save              io                   0.137436   0.274872  2.000000         N/A    0.000000    0.000000
+vertex_numbering_local        compute              0.245453   0.272180  1.108889         N/A    0.000000    0.000000
+face_local_extract            compute              0.168985   0.174429  1.032212         N/A    0.000000    0.000000
+metis_partition               compute              0.117563   0.127903  1.087953         N/A    0.000000    0.000000
+face_global_merge             compute              0.076675   0.079920  1.042330         N/A    0.000000    0.000000
+face_allgatherv               communication        0.050451   0.050464  1.000255         N/A    4.634499    9.268997
+vertex_exchange               communication        0.018458   0.034731  1.881584         N/A    0.226131    0.226131
+face_pre_collective_wait      synchronization      0.016543   0.033057  1.998254         N/A    0.000000    0.000000
+part_face_create              compute              0.030804   0.032829  1.065726         N/A    0.000000    0.000000
+coarse_edge_mesh              setup                0.013710   0.015058  1.098379         N/A    0.000000    0.000000
+testout_io                    io                   0.009502   0.012074  1.270615         N/A    0.000000    0.000000
+face_map_setup                compute              0.007069   0.007414  1.048794         N/A    0.000000    0.000000
+element_count_allgather       communication        0.002526   0.005005  1.981174         N/A    0.000008    0.000015
+vertex_exchange_unpack        compute              0.001865   0.003729  1.999464         N/A    0.000000    0.000000
+volume_payload_exchange       communication        0.002710   0.003372  1.244243         N/A    4.799309    4.799309
+adjacency_build               compute              0.002851   0.002896  1.015809         N/A    0.000000    0.000000
+volume_payload_prepare        compute              0.000935   0.001575  1.684862         N/A    0.000000    0.000000
+face_collective_setup         compute              0.000148   0.000152  1.025326         N/A    0.000000    0.000000
+submesh_initialization        setup                0.000119   0.000120  1.000670         N/A    0.000000    0.000000
+vertex_exchange_prepare       compute              0.000047   0.000087  1.857783         N/A    0.000000    0.000000
+
+Files (文件说明)
+  summary.txt       人工阅读摘要
+  run_summary.csv   单次运行总指标
+  stages.csv        按阶段聚合指标
+  rank_stages.csv   各进程逐阶段原始指标
+  rank_metrics.csv  各进程网格规模与内存指标
+  metadata.txt      命令、平台和参数信息
