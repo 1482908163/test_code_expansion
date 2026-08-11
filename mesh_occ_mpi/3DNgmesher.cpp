@@ -427,6 +427,13 @@ void fid_xdMeshFaceInfo::build_MPIType() {
 //  -param : sub_face_map 输入的子网格
 
 
+static void ProfileCollectiveArrivalWait(const char *stage, MPI_Comm comm)
+{
+	if (!scaling::Profiler::instance().enabled()) return;
+	scaling::StageScope profile_stage(stage, "synchronization");
+	MPI_Barrier(comm);
+}
+
 void Allgather_Face_Map(std::map<int, xdMeshFaceInfo> &facemap, fid_xdMeshFaceInfo *sub_face_map, int ne, int sub_ne, int *every_sub_ne, int *every_offset, double *stage_time) {
 	if (stage_time) {
 		for (int i = 0; i < 3; i++) stage_time[i] = 0.0;
@@ -436,11 +443,6 @@ void Allgather_Face_Map(std::map<int, xdMeshFaceInfo> &facemap, fid_xdMeshFaceIn
 	int rank;
 	//获取当前进程的MPI等级
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	//进行数据的同步，并将负载不均衡造成的等待与通信时间分开记录。
-	{
-		scaling::StageScope profile_stage("face_pre_collective_wait", "synchronization");
-		MPI_Barrier(MPI_COMM_WORLD);
-	}
 	fid_xdMeshFaceInfo *sub_face_maps = nullptr;
 	{
 		scaling::StageScope profile_stage("face_collective_setup", "compute");
@@ -449,6 +451,8 @@ void Allgather_Face_Map(std::map<int, xdMeshFaceInfo> &facemap, fid_xdMeshFaceIn
 		//分配内存空间，创建用于存储合并后面映射数据的数组
 		sub_face_maps = (fid_xdMeshFaceInfo*)malloc(sizeof(fid_xdMeshFaceInfo) *(ne)*4);
 	}
+	// 在所有本地准备完成后对齐，避免把本地分配时间计入集合通信执行。
+	ProfileCollectiveArrivalWait("face_pre_collective_wait", MPI_COMM_WORLD);
 	double before_allgather = MPI_Wtime();
 	if (stage_time) stage_time[0] = before_allgather - gather_start;
 
@@ -1472,6 +1476,7 @@ int *com_barycoords(
 	MYCALLOC(globoffsetsml, int *, (numprocs + 1), sizeof(int));
 	globoffsets = globoffsetsml + 1;
 	globoffsets[-1] = 0;
+	ProfileCollectiveArrivalWait("vertex_count_pre_collective_wait", comm);
 	{
 		scaling::StageScope profile_stage("vertex_count_allgather", "communication");
 		MPI_Allgather(&newglobalnocounter, 1, MPI_INT, globoffsets, 1, MPI_INT, comm);
@@ -1496,6 +1501,7 @@ int *com_barycoords(
 	MYCALLOC(globoffsetsmlVE, int *, (numprocs + 1), sizeof(int));
 	globoffsetsVE = globoffsetsmlVE + 1;
 	globoffsetsVE[-1] = 0;
+	ProfileCollectiveArrivalWait("element_count_pre_collective_wait", comm);
 	{
 		scaling::StageScope profile_stage("element_count_allgather", "communication");
 		MPI_Allgather(&numNEs, 1, MPI_INT, globoffsetsVE, 1, MPI_INT, comm);
@@ -1957,8 +1963,10 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 
 	int Aspect_Ratio_count[6] = {0, 0, 0, 0, 0, 0}; // 记录长宽比
 
-	for (int i = 0; i < nse; i++)
 	{
+		scaling::StageScope profile_stage("quality_surface_compute", "postprocess");
+		for (int i = 0; i < nse; i++)
+		{
 		nglib::Ng_GetSurfaceElement(newMesh, i + 1, surfpoints, surfidx);
 		for (int k = 0; k < 3; k++)
 		{ // Each face has three points
@@ -1983,17 +1991,23 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		TRIS_sum += TRIS;
 		TRIS_min = (std::min)(TRIS_min, TRIS);
 		TRIS_max = (std::max)(TRIS_max, TRIS);
+		}
 	}
 	int *Sum_Aspect_Ratio_count;
 	if(id == 0)
 		Sum_Aspect_Ratio_count = new int[6]{};
 	int reduce_dummy = 0;
 	for(int i = 0; i < 6; i++) {
-		int *receive_value = id == 0 ? &Sum_Aspect_Ratio_count[i] : &reduce_dummy;
-		MPI_Reduce(&Aspect_Ratio_count[i], receive_value, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+		ProfileCollectiveArrivalWait("quality_reduce_pre_collective_wait", MPI_COMM_WORLD);
+		{
+			scaling::StageScope profile_stage("quality_reduce", "communication");
+			int *receive_value = id == 0 ? &Sum_Aspect_Ratio_count[i] : &reduce_dummy;
+			MPI_Reduce(&Aspect_Ratio_count[i], receive_value, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+		}
 	}
 	if(id == 0)
 	{
+		scaling::StageScope profile_stage("quality_summary_io", "io");
 		// printf("Sum_Aspect_Ratio_count : %d\n",Sum_Aspect_Ratio_count[0]);
 		std::string savename = OUTPUT_PATH + "meshQuality/meshQuality.txt";
 		FILE *fp = std::fopen(savename.c_str(), "w");
@@ -2030,8 +2044,10 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 	double VTRIS_sum = 0;
 	double VTRIS_max = 0;
 	double VTRIS_min = 0x3f3f3f;
-	for (int i = 0; i < ne; i++)
 	{
+		scaling::StageScope profile_stage("quality_volume_compute", "postprocess");
+		for (int i = 0; i < ne; i++)
+		{
 		nglib::Ng_GetVolumeElement(newMesh, i + 1, volpoints, volidx);
 		for (int k = 0; k < 4; k++)
 		{ // Each face has three points
@@ -2075,16 +2091,19 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		}
 		VMinIA = (std::min)({face_VMinIA[0], face_VMinIA[1], face_VMinIA[2], face_VMinIA[3]});
 		VMaxIA = (std::max)({face_VMaxIA[0], face_VMaxIA[1], face_VMaxIA[2], face_VMaxIA[3]});
+		}
 	}
 
-	std::string savename = OUTPUT_PATH + "meshQuality/meshQuality" + std::to_string(id) + ".txt";
-	FILE *fp = std::fopen(savename.c_str(), "w");
-	if (fp == NULL)
 	{
-		std::cout << "File " << savename.c_str() << "canot open" << std::endl;
-	}
-	else
-	{
+		scaling::StageScope profile_stage("quality_rank_io", "io");
+		std::string savename = OUTPUT_PATH + "meshQuality/meshQuality" + std::to_string(id) + ".txt";
+		FILE *fp = std::fopen(savename.c_str(), "w");
+		if (fp == NULL)
+		{
+			std::cout << "File " << savename.c_str() << "canot open" << std::endl;
+		}
+		else
+		{
 
 		fprintf(fp, "Point_Num: %d SurfEle_Num: %d SoildEle_Num: %d \r\n", np, nse, ne);
 		fprintf(fp, "\r\n");
@@ -2119,8 +2138,9 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		fprintf(fp, "tetrahedrons_skew_mean: %f \r\n", VTRIS_sum / ne);
 		fprintf(fp, "tetrahedrons_internal_angle_min: %f \r\n", VMinIA);
 		fprintf(fp, "tetrahedrons_internal_angle_max: %f \r\n", VMaxIA);
+		}
+		if (fp != NULL) std::fclose(fp);
 	}
-	std::fclose(fp);
 	return false;
 }
 

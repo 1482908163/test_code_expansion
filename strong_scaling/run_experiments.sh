@@ -234,6 +234,7 @@ echo "Result directory: ${RUN_ROOT}"
 echo "Environment: ${environment_file}"
 echo "============================================================"
 
+overall_status=0
 for processes in ${PROCESS_COUNTS}; do
     if (( processes <= 0 )); then
         echo "[ERROR] 非法进程数: ${processes}" >&2
@@ -379,7 +380,10 @@ for processes in ${PROCESS_COUNTS}; do
 
         if (( run_status != 0 )); then
             echo "[ERROR] ${run_tag} 失败，退出码 ${run_status}；日志: ${log_file}" >&2
-            exit "${run_status}"
+            if (( overall_status == 0 )); then
+                overall_status="${run_status}"
+            fi
+            echo "[CONTINUE] 记录失败并继续后续重复实验。" >&2
         fi
     done
 done
@@ -387,11 +391,23 @@ done
 if [[ "${DRY_RUN}" == "1" ]]; then
     echo "[OK] dry-run 完成；命令清单: ${RUN_ROOT}/commands/"
 elif [[ "${ANALYZE_AFTER_RUN}" == "1" ]]; then
+    set +e
     python3 "${SCRIPT_DIR}/analyze_results.py" "${RUN_ROOT}"
-    echo
-    cat "${RUN_ROOT}/analysis/scaling_report.txt"
-    echo
-    echo "[OK] 全部原始数据和分析结果: ${RUN_ROOT}"
+    analysis_status=$?
+    set -e
+    if (( analysis_status == 0 )); then
+        echo
+        cat "${RUN_ROOT}/analysis/scaling_report.txt"
+        echo
+        echo "[OK] 全部原始数据和分析结果: ${RUN_ROOT}"
+    else
+        echo "[ERROR] 分析失败，exit=${analysis_status}" >&2
+        if (( overall_status == 0 )); then
+            overall_status="${analysis_status}"
+        fi
+    fi
 else
     echo "[OK] 本作业运行完成；等待其他规模结束后统一分析: ${RUN_ROOT}"
 fi
+
+exit "${overall_status}"

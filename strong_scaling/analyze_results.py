@@ -28,6 +28,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def read_runs(experiment_dir: Path) -> list[dict[str, str]]:
+    run_states: dict[tuple[int, int], str] = {}
+    status_dir = experiment_dir / "status"
+    if status_dir.is_dir():
+        for status_path in sorted(status_dir.glob("*.tsv")):
+            with status_path.open(newline="", encoding="utf-8") as stream:
+                for status_row in csv.DictReader(stream, delimiter="\t"):
+                    try:
+                        key = (
+                            int(status_row["processes"]),
+                            int(status_row["repeat"]),
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    run_states[key] = status_row.get("state", "")
+
     runs: list[dict[str, str]] = []
     for path in sorted(experiment_dir.rglob("run_summary.csv")):
         if "analysis" in path.parts:
@@ -37,6 +52,12 @@ def read_runs(experiment_dir: Path) -> list[dict[str, str]]:
         if len(rows) != 1:
             raise ValueError(f"{path} should contain exactly one data row")
         row = rows[0]
+        try:
+            run_key = (int(row["processes"]), int(row["repeat"]))
+        except (KeyError, TypeError, ValueError):
+            run_key = None
+        if run_key is not None and run_states.get(run_key, "COMPLETED") != "COMPLETED":
+            continue
         row["source_file"] = str(path)
         runs.append(row)
     if not runs:
@@ -160,11 +181,11 @@ def main() -> None:
     base_processes = process_counts[0]
     base_time = median_field(grouped[base_processes], "total_wall_max_s")
 
-    numeric_fields = [
-        key
-        for key in runs[0]
-        if key not in IDENTITY_FIELDS and key != "source_file"
-    ]
+    numeric_fields = sorted(
+        set().union(*(row.keys() for row in runs))
+        - IDENTITY_FIELDS
+        - {"source_file"}
+    )
     summary_rows: list[dict[str, float | int | str]] = []
     for processes in process_counts:
         rows = grouped[processes]
@@ -285,6 +306,22 @@ def main() -> None:
         cold_cache_state = (
             "cold" if effective_cold_states == {"cold"} else "cold_candidate"
         )
+        cold_arrival_wait_fraction = median_field(
+            cold_rows, "arrival_wait_fraction_max_percent"
+        )
+        warm_arrival_wait_fraction = median_field(
+            warm_rows, "arrival_wait_fraction_max_percent"
+        )
+        cold_arrival_wait = (
+            median_field(cold_rows, "synchronization_max_s")
+            if math.isfinite(cold_arrival_wait_fraction)
+            else math.nan
+        )
+        warm_arrival_wait = (
+            median_field(warm_rows, "synchronization_max_s")
+            if math.isfinite(warm_arrival_wait_fraction)
+            else math.nan
+        )
         cold_warm_rows.append(
             {
                 "experiment": cold_rows[0]["experiment"] if cold_rows else warm_rows[0]["experiment"],
@@ -319,6 +356,16 @@ def main() -> None:
                 ),
                 "warm_communication_fraction_max_percent": median_field(
                     warm_rows, "communication_fraction_max_percent"
+                ),
+                "cold_arrival_wait_max_s": cold_arrival_wait,
+                "warm_arrival_wait_max_s": warm_arrival_wait,
+                "cold_arrival_wait_fraction_max_percent": cold_arrival_wait_fraction,
+                "warm_arrival_wait_fraction_max_percent": warm_arrival_wait_fraction,
+                "cold_communication_plus_wait_fraction_max_percent": median_field(
+                    cold_rows, "communication_plus_wait_fraction_max_percent"
+                ),
+                "warm_communication_plus_wait_fraction_max_percent": median_field(
+                    warm_rows, "communication_plus_wait_fraction_max_percent"
                 ),
                 "cold_io_max_s": median_field(cold_rows, "io_max_s"),
                 "warm_io_max_s": median_field(warm_rows, "io_max_s"),
@@ -364,6 +411,8 @@ def main() -> None:
         "profile_coverage_percent",
         "unprofiled_max_s",
         "communication_fraction_max_percent",
+        "arrival_wait_fraction_max_percent",
+        "communication_plus_wait_fraction_max_percent",
         "communication_max_s",
         "synchronization_max_s",
         "io_fraction_max_percent",
@@ -402,7 +451,7 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(cold_warm_rows)
 
-    raw_fields = list(runs[0].keys())
+    raw_fields = sorted(set().union(*(row.keys() for row in runs)))
     with (output_dir / "all_runs.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=raw_fields)
         writer.writeheader()
@@ -464,20 +513,108 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(stage_summary_rows)
 
+    collective_pairs = [
+        ("face_allgatherv", "face_pre_collective_wait", "face_allgatherv"),
+        (
+            "vertex_count_allgather",
+            "vertex_count_pre_collective_wait",
+            "vertex_count_allgather",
+        ),
+        (
+            "element_count_allgather",
+            "element_count_pre_collective_wait",
+            "element_count_allgather",
+        ),
+        (
+            "quality_reduce",
+            "quality_reduce_pre_collective_wait",
+            "quality_reduce",
+        ),
+    ]
+    collective_split_rows: list[dict[str, float | int | str]] = []
+    for processes in process_counts:
+        for collective, wait_stage, execution_stage in collective_pairs:
+            wait_rows = stage_grouped.get((processes, wait_stage), [])
+            execution_rows = stage_grouped.get((processes, execution_stage), [])
+            # A collective call from an older profiler is not an aligned
+            # execution measurement unless its matching wait stage exists.
+            if not wait_rows:
+                continue
+            cold_wait_rows = [row for row in wait_rows if int(row["repeat"]) == 1]
+            warm_wait_rows = [row for row in wait_rows if int(row["repeat"]) > 1]
+            cold_execution_rows = [
+                row for row in execution_rows if int(row["repeat"]) == 1
+            ]
+            warm_execution_rows = [
+                row for row in execution_rows if int(row["repeat"]) > 1
+            ]
+            cold_wait = median_field(cold_wait_rows, "time_max_s")
+            warm_wait = median_field(warm_wait_rows, "time_max_s")
+            cold_execution = median_field(cold_execution_rows, "time_max_s")
+            warm_execution = median_field(warm_execution_rows, "time_max_s")
+            observed = finite(
+                [cold_wait, warm_wait, cold_execution, warm_execution]
+            )
+            if not observed or max(observed) <= 0.0:
+                continue
+            collective_split_rows.append(
+                {
+                    "experiment": runs[0]["experiment"],
+                    "processes": processes,
+                    "collective": collective,
+                    "cold_arrival_wait_max_s": cold_wait,
+                    "cold_aligned_execution_max_s": cold_execution,
+                    "cold_wait_percent_of_pair": (
+                        100.0 * cold_wait / (cold_wait + cold_execution)
+                        if cold_wait + cold_execution > 0.0
+                        else math.nan
+                    ),
+                    "warm_arrival_wait_max_s": warm_wait,
+                    "warm_aligned_execution_max_s": warm_execution,
+                    "warm_wait_percent_of_pair": (
+                        100.0 * warm_wait / (warm_wait + warm_execution)
+                        if warm_wait + warm_execution > 0.0
+                        else math.nan
+                    ),
+                }
+            )
+
+    collective_split_fields = [
+        "experiment",
+        "processes",
+        "collective",
+        "cold_arrival_wait_max_s",
+        "cold_aligned_execution_max_s",
+        "cold_wait_percent_of_pair",
+        "warm_arrival_wait_max_s",
+        "warm_aligned_execution_max_s",
+        "warm_wait_percent_of_pair",
+    ]
+    with (output_dir / "collective_split.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=collective_split_fields)
+        writer.writeheader()
+        writer.writerows(collective_split_rows)
+
     first = summary_rows[0]
     last = summary_rows[-1]
+    collective_split_available = any(
+        math.isfinite(float(row.get("arrival_wait_fraction_max_percent", math.nan)))
+        for row in summary_rows
+    )
     with (output_dir / "scaling_report.txt").open("w", encoding="utf-8") as output:
         output.write("Strong Scaling Summary (强扩展汇总)\n")
-        output.write("=" * 127 + "\n")
+        output.write("=" * 138 + "\n")
         output.write(f"Experiment (实验): {first['experiment']}\n")
         output.write(f"Baseline (基准): {base_processes} processes, {base_time:.6f} s\n")
         output.write(
             "\n"
             f"{'P':>7} {'Runs':>6} {'Time(s)':>11} {'Speedup':>10} {'Eff(%)':>9} "
-            f"{'Comm(%)':>10} {'I/O(%)':>9} {'Cover(%)':>9} {'CacheMiss(%)':>14} {'IPC':>8} "
+            f"{'Wait(%)':>10} {'Comm(%)':>10} {'I/O(%)':>9} {'Cover(%)':>9} {'CacheMiss(%)':>14} {'IPC':>8} "
             f"{'Load M/A':>10} {'RSS(MiB)':>11} {'CV(%)':>8}\n"
         )
-        output.write("-" * 127 + "\n")
+        output.write("-" * 138 + "\n")
         for row in summary_rows:
             cache_available = int(row["cache_valid_repetitions"]) > 0
             cache_miss_rate = (
@@ -489,6 +626,7 @@ def main() -> None:
                 f"{format_number(float(row['total_wall_max_s']), 11)}"
                 f"{format_number(float(row['speedup']), 10)}"
                 f"{format_number(float(row['parallel_efficiency_percent']), 9, 2)}"
+                f"{format_number(float(row.get('arrival_wait_fraction_max_percent', math.nan)), 10, 2)}"
                 f"{format_number(float(row['communication_fraction_max_percent']), 10, 2)}"
                 f"{format_number(float(row['io_fraction_max_percent']), 9, 2)}"
                 f"{format_number(float(row['profile_coverage_percent']), 9, 2)}"
@@ -505,11 +643,22 @@ def main() -> None:
             f"{float(first['parallel_efficiency_percent']):.2f}% -> "
             f"{float(last['parallel_efficiency_percent']):.2f}%\n"
         )
-        output.write(
-            f"  Communication fraction (通信占比): "
-            f"{float(first['communication_fraction_max_percent']):.2f}% -> "
-            f"{float(last['communication_fraction_max_percent']):.2f}%\n"
-        )
+        if collective_split_available:
+            output.write(
+                f"  Collective arrival-wait fraction (集合通信到达等待占比): "
+                f"{float(first.get('arrival_wait_fraction_max_percent', math.nan)):.2f}% -> "
+                f"{float(last.get('arrival_wait_fraction_max_percent', math.nan)):.2f}%\n"
+            )
+            output.write(
+                f"  Aligned communication execution fraction (对齐后通信执行占比): "
+                f"{float(first['communication_fraction_max_percent']):.2f}% -> "
+                f"{float(last['communication_fraction_max_percent']):.2f}%\n"
+            )
+        else:
+            output.write(
+                "  Collective split (集合通信拆分): N/A（旧版结果）；"
+                "旧版 Comm(%) 包含到达等待，不能解释为对齐后的通信执行。\n"
+            )
         output.write(
             f"  I/O fraction (I/O 占比): "
             f"{float(first['io_fraction_max_percent']):.2f}% -> "
@@ -545,6 +694,8 @@ def main() -> None:
         output.write("\nFiles (文件)\n")
         output.write("  scaling_summary.csv  各进程数的中位数、加速比和并行效率\n")
         output.write("  stage_scaling.csv    各进程数逐阶段的中位数指标\n")
+        output.write("  collective_split.csv 各集合通信的到达等待/对齐执行拆分\n")
+        output.write("  collective_split_report.txt 集合通信拆分可读报告\n")
         output.write("  all_runs.csv         所有重复实验的原始总指标\n")
         output.write("  cold_warm_summary.csv  冷/热页缓存分离汇总\n")
         output.write("  cold_warm_report.txt   冷/热页缓存可读报告\n")
@@ -578,6 +729,52 @@ def main() -> None:
                 f"{format_number(float(row['cold_physical_read_total_bytes']) / (1024**3), 16, 3)}"
                 f"{format_number(float(row['warm_physical_read_total_bytes']) / (1024**3), 16, 3)}"
                 f"{format_number(float(row['warm_total_time_cv_percent']), 11, 2)}\n"
+            )
+
+    with (output_dir / "collective_split_report.txt").open(
+        "w", encoding="utf-8"
+    ) as output:
+        output.write("Collective Communication Split (集合通信拆分)\n")
+        output.write("=" * 109 + "\n")
+        output.write(
+            "Wait 为集合通信前的到达对齐 Barrier；Exec 为随后原集合通信调用的执行时间。"
+            "Exec 仍包含 MPI 算法、协议和内存复制，并非纯网络时间。"
+            "旧版中没有匹配 Wait 阶段的集合通信不会列入本表。\n\n"
+        )
+        output.write(
+            f"{'P':>7} {'Collective':<30} {'ColdWait(s)':>13} {'ColdExec(s)':>13} "
+            f"{'ColdWait%':>11} {'WarmWait(s)':>13} {'WarmExec(s)':>13} {'WarmWait%':>11}\n"
+        )
+        output.write("-" * 109 + "\n")
+        for row in collective_split_rows:
+            output.write(
+                f"{int(row['processes']):>7} {str(row['collective']):<30}"
+                f"{format_number(float(row['cold_arrival_wait_max_s']), 13)}"
+                f"{format_number(float(row['cold_aligned_execution_max_s']), 13)}"
+                f"{format_number(float(row['cold_wait_percent_of_pair']), 11, 2)}"
+                f"{format_number(float(row['warm_arrival_wait_max_s']), 13)}"
+                f"{format_number(float(row['warm_aligned_execution_max_s']), 13)}"
+                f"{format_number(float(row['warm_wait_percent_of_pair']), 11, 2)}\n"
+            )
+
+        output.write("\nTotal communication categories (通信类别总计)\n")
+        output.write(
+            f"{'P':>7} {'ColdWait(s)':>13} {'ColdWait(%)':>13} {'ColdComm(s)':>13} "
+            f"{'ColdComm(%)':>13} {'WarmWait(s)':>13} {'WarmWait(%)':>13} "
+            f"{'WarmComm(s)':>13} {'WarmComm(%)':>13}\n"
+        )
+        output.write("-" * 124 + "\n")
+        for row in cold_warm_rows:
+            output.write(
+                f"{int(row['processes']):>7}"
+                f"{format_number(float(row['cold_arrival_wait_max_s']), 13)}"
+                f"{format_number(float(row['cold_arrival_wait_fraction_max_percent']), 13, 2)}"
+                f"{format_number(float(row['cold_communication_max_s']), 13)}"
+                f"{format_number(float(row['cold_communication_fraction_max_percent']), 13, 2)}"
+                f"{format_number(float(row['warm_arrival_wait_max_s']), 13)}"
+                f"{format_number(float(row['warm_arrival_wait_fraction_max_percent']), 13, 2)}"
+                f"{format_number(float(row['warm_communication_max_s']), 13)}"
+                f"{format_number(float(row['warm_communication_fraction_max_percent']), 13, 2)}\n"
             )
 
     scaling_by_process = {int(row["processes"]): row for row in summary_rows}

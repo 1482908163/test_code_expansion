@@ -64,25 +64,34 @@ GCCHOME=/new/gcc-12 LOCAL_LIB=/new/local/lib \
 `DRY_RUN=1` 只生成计划并打印 `yhbatch` 命令，不提交作业：
 
 ```bash
-DRY_RUN=1 bash strong_scaling/submit_suite.sh
+DRY_RUN=1 bash strong_scaling/submit_experiments.sh
 ```
 
-推荐入口的默认规模为 `1 2 4 8 16 32 64 128 256` 个进程，每个规模重复 3 次，每节点 1 个 MPI（消息传递接口）进程。提交脚本仍为每个进程数申请一个独立 Slurm 作业，但默认使用 `afterany` 依赖按 P 从小到大串行启动；因此本批实验的不同 P 不会同时争用共享文件系统。同一 P 的所有模式和重复实验在同一个 allocation（资源分配）中顺序完成，最后自动启动汇总作业。
+主入口仍是原来的 `strong_scaling/submit_experiments.sh`。默认规模和每节点进程数以脚本顶部配置为准，每个规模重复 6 次。提交脚本仍为每个进程数申请一个独立 Slurm 作业，但默认使用 `afterany` 依赖按 P 从小到大串行启动；因此本批实验的不同 P 不会同时争用共享文件系统。即使某个 P 作业失败，后续 P 仍会启动。同一 P 的所有模式和重复实验在同一个 allocation（资源分配）中顺序完成；某次重复失败后会继续本模式的剩余重复，某个模式失败后也会继续后续模式，最后仍生成包含失败/缺失项的统一报告。
 
 ### 3.2 推荐：一次提交完整实验套件
 
 ```bash
-bash strong_scaling/submit_suite.sh
+SUITE_MODES="core_timing core_cache full_io" \
+  bash strong_scaling/submit_experiments.sh
 ```
 
 这一个命令会在每个 P 的同一批节点上依次运行：
 
-1. `core_cache`：核心路径计时、通信、并行效率和 CPU（中央处理器）硬件缓存计数；
-2. `full_io`：完整结果写出和 I/O（输入/输出）计时。
+1. `core_timing`：核心路径计时、通信和并行效率，不启用硬件计数器；
+2. `core_cache`：相同核心路径并启用 CPU（中央处理器）硬件缓存计数；
+3. `full_io`：完整结果写出和 I/O（输入/输出）计时。
 
-核心计时和硬件缓存计数由同一次 `core_cache` 运行产生，因此不再默认提交第三组实验。若需要单独标定硬件计数器开销，可覆盖 `SUITE_MODES="core_timing core_cache full_io"`；统一报告会优先使用无硬件计数器的 `core_timing` 作为主强扩展曲线。
+三种模式默认分开，避免硬件计数器或结果写出污染主计时。一次提交执行哪些模式可自由选择，也接受逗号分隔，例如：
 
-每种模式默认重复 3 次。第 1 次运行前，会在各计算节点通过 `POSIX_FADV_DONTNEED` 请求丢弃输入文件、可执行文件和动态库的 OS（操作系统）页缓存，标为 cold（冷缓存）；第 2、3 次不清理，作为 warm（热缓存），报告取其中位数。该接口只是无特权的内核提示，是否真正形成冷启动要结合报告中的 `PhysR`（物理读取量）判断。
+```bash
+SUITE_MODES="core_timing,full_io" \
+  bash strong_scaling/submit_experiments.sh
+```
+
+`submit_suite.sh` 保留为兼容入口，内部仍转到 `submit_experiments.sh`，无需更换已有脚本名称。
+
+每种模式默认重复 6 次：第 1 次运行前，会在各计算节点通过 `POSIX_FADV_DONTNEED` 请求丢弃输入文件、可执行文件和动态库的 OS（操作系统）页缓存，标为 cold（冷缓存）；第 2–6 次不清理，作为 5 个 warm（热缓存）样本，报告取中位数。该接口只是无特权的内核提示，是否真正形成冷启动要结合报告中的 `PhysR`（物理读取量）判断。
 
 “一次提交”不是只执行一次程序：冷/热对照至少需要两次运行，而核心路径和完整 I/O 也必须分开，否则结果写出会污染通信计时。
 
@@ -90,17 +99,18 @@ bash strong_scaling/submit_suite.sh
 
 | 变量 | 默认值 | 含义 |
 |---|---:|---|
-| `PROCESS_COUNTS` | `1 2 4 8 16 32 64 128 256` | MPI 进程数序列 |
-| `REPEATS` | `3` | 每个规模的重复次数 |
-| `RANKS_PER_NODE` | `1` | 每节点 MPI 进程数 |
+| `PROCESS_COUNTS` | `1 8 16 32 64 128 256 512 1024 2048 4096` | MPI 进程数序列 |
+| `REPEATS` | `6` | 每个规模的重复次数：1 次 cold + 5 次 warm |
+| `RANKS_PER_NODE` | `16` | 每节点 MPI 进程数 |
 | `PARTITION` | `mt_module` | Slurm 分区 |
 | `LAUNCHER_EXTRA_ARGS` | `--mpi=pmix` | `yhrun` 的附加参数 |
 | `CPU_BIND` | `cores` | 将 rank（进程）绑定到 CPU 核；若该集群不接受此参数，设为 `none` |
-| `CORE_ONLY` | `1` | `1` 跳过普通结果写出，`0` 测完整 I/O |
-| `CACHE_COUNTERS` | `0` | 是否采集硬件缓存计数 |
+| `SUITE_MODE` | `1` | `1` 执行自定义模式套件；设为 `0` 可兼容原来的单模式调用 |
+| `CORE_ONLY` | 套件按模式设置 | 单模式时，`1` 跳过普通结果写出，`0` 测完整 I/O |
+| `CACHE_COUNTERS` | 套件按模式设置 | 单模式时是否采集硬件缓存计数 |
 | `SERIALIZE_JOBS` | `1` | `1` 使不同 P 作业按依赖串行，避免本批实验相互争用共享文件系统 |
-| `SUITE_MODES` | `core_cache full_io` | 统一套件包含的模式；由 `submit_suite.sh` 使用 |
-| `PAGE_CACHE_POLICY` | 套件为 `evict-first` | `evict-first` 在每种模式的第 1 次运行前请求清理文件页缓存；`observe` 只观察首次运行 |
+| `SUITE_MODES` | `core_timing core_cache full_io` | 一次提交包含的模式，可用空格或逗号分隔 |
+| `PAGE_CACHE_POLICY` | `evict-first` | 每种模式的第 1 次运行前请求清理文件页缓存；`observe` 只观察首次运行 |
 | `PAGE_CACHE_STRICT` | `0` | 清缓存提示失败时是否立即终止；默认继续并把该次标为候选冷启动 |
 | `LEVELS` / `REFINES` | `2` / `2` | 表面和体网格细化次数 |
 | `MAXH` / `MINH` | `1000.0` / `0.0` | 网格尺度参数 |
@@ -140,12 +150,13 @@ PROCESS_COUNTS="16 32" REPEATS=1 \
 
 ```text
 strong_scaling_results/
-└── strong_scaling_suite_l2_r2_YYYYMMDD-HHMMSS/
+└── strong_scaling_suite_YYYYMMDD-HHMMSS/
     ├── run_plan.txt                 # 参数、规模与 Slurm 作业号
     ├── scheduler_logs/              # sbatch 标准输出/错误
     ├── mode_status/                 # 每个 P、每种模式的完成状态
     ├── modes/
-    │   ├── core_cache/              # 核心、通信、并行效率和硬件缓存
+    │   ├── core_timing/             # 无硬件计数器的主计时曲线
+    │   ├── core_cache/              # 核心路径和硬件缓存
     │   │   ├── environment/         # CPU/cache、模块、动态库和 git 提交
     │   │   ├── commands/            # 每次运行的完整可复现命令
     │   │   ├── launcher_logs/       # 每次 yhrun 的程序输出
@@ -156,7 +167,9 @@ strong_scaling_results/
     │   └── full_io/                 # 相同结构；另含普通网格输出
     └── analysis/
         ├── suite_report.txt         # 首先阅读：热缓存主曲线与冷/热对照
-        └── suite_summary.csv        # 核心、cache、I/O 的统一绘图数据
+        ├── suite_summary.csv        # 核心、cache、I/O 的统一绘图数据
+        ├── suite_status.csv         # 每个 P/模式的完成、失败或缺失状态
+        └── mode_analysis_status.tsv # 各模式汇总脚本状态
 ```
 
 这样每批数据、运行环境、命令、日志和分析都在同一个目录中；后续只需提供该目录，即可直接读取并比较瓶颈。
@@ -183,6 +196,8 @@ E(P)=\frac{S(P)}{P/P_0}\times100\%.
 - Linux `perf_event_open` 负责 cache references/misses、cycles、instructions 和 IPC。若 `perf_event_paranoid` 权限不足，程序仍会完成并将缓存指标标为 `N/A`。
 - 通用 `cache-references`/`cache-misses` 的精确定义随 CPU 型号变化，只应在相同节点型号、相同绑核方式下横向比较。
 - `Profile coverage`（计时覆盖率）之外的时间列为 `unprofiled`（未细分），可用于发现尚未插桩的路径。
+- 所有模式共用同一套集合通信插桩：每次应用层集合通信前增加一个 profiling 专用 `MPI_Barrier`，其时间报告为 `Wait`（到达等待）；随后原集合通信调用报告为 `Comm`（对齐后的通信执行）。因此 `Comm(%)` 不再把到达等待相加。
+- `Comm` 不是纯网络传输时间：它仍包含 MPI 集合算法、协议、内存复制等开销；点对点通信阶段也计入 `Comm`，其中阻塞式调用仍可能包含对端就绪等待。前置 Barrier 只在启用 profiler 时执行。
 - 通信字节数是应用层缓冲区规模，不等同于网络链路上的实际流量；集合通信接收量包含本进程贡献。
 - `/proc/self/io` 用于区分逻辑和物理 I/O。逻辑读写量大、物理读写量小，通常表示页缓存或延迟写回生效。
 - 主强扩展曲线只使用 warm（第 2 次及以后）的中位数；cold（第 1 次）单列，二者不再混合计算中位数或变异系数。

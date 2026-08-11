@@ -4,13 +4,15 @@ set -Euo pipefail
 SCRIPT_DIR="$(cd "${STRONG_SCALING_DIR:-$(dirname "${BASH_SOURCE[0]}")}" && pwd)"
 SUITE_ROOT="${SUITE_ROOT:?SUITE_ROOT 未设置}"
 SUITE_NAME="${SUITE_NAME:?SUITE_NAME 未设置}"
-SUITE_MODES="${SUITE_MODES:-core_cache full_io}"
+SUITE_MODES="${SUITE_MODES:-core_timing core_cache full_io}"
+SUITE_MODES="${SUITE_MODES//,/ }"
 PROCESS_COUNTS="${PROCESS_COUNTS:?PROCESS_COUNTS 未设置}"
 
 mkdir -p "${SUITE_ROOT}/mode_status"
 overall_status=0
+read -r -a suite_modes_array <<< "${SUITE_MODES}"
 
-for mode in ${SUITE_MODES}; do
+for mode in "${suite_modes_array[@]}"; do
     case "${mode}" in
         core_cache)
             mode_core_only=1

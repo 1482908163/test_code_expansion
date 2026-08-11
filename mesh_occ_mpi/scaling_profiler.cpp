@@ -60,7 +60,9 @@ const std::vector<StageDefinition> &stage_definitions()
         {"refined_volume_save", "io"},
         {"adjacency_build", "compute"},
         {"vertex_numbering_local", "compute"},
+        {"vertex_count_pre_collective_wait", "synchronization"},
         {"vertex_count_allgather", "communication"},
+        {"element_count_pre_collective_wait", "synchronization"},
         {"element_count_allgather", "communication"},
         {"vertex_exchange_prepare", "compute"},
         {"vertex_exchange", "communication"},
@@ -74,7 +76,12 @@ const std::vector<StageDefinition> &stage_definitions()
         {"final_mesh_save", "io"},
         {"testout_io", "io"},
         {"final_count_exchange", "communication"},
-        {"quality_evaluation", "postprocess"},
+        {"quality_surface_compute", "postprocess"},
+        {"quality_reduce_pre_collective_wait", "synchronization"},
+        {"quality_reduce", "communication"},
+        {"quality_summary_io", "io"},
+        {"quality_volume_compute", "postprocess"},
+        {"quality_rank_io", "io"},
     };
     return definitions;
 }
@@ -890,8 +897,16 @@ void Profiler::finalize()
             }
 
             const double communication_fraction_avg = 100.0 * safe_ratio(
-                communication_and_wait_stats.average, total_stats.average);
+                communication_stats.average, total_stats.average);
             const double communication_fraction_max = 100.0 * safe_ratio(
+                communication_stats.maximum, total_stats.maximum);
+            const double arrival_wait_fraction_avg = 100.0 * safe_ratio(
+                synchronization_stats.average, total_stats.average);
+            const double arrival_wait_fraction_max = 100.0 * safe_ratio(
+                synchronization_stats.maximum, total_stats.maximum);
+            const double communication_plus_wait_fraction_avg = 100.0 * safe_ratio(
+                communication_and_wait_stats.average, total_stats.average);
+            const double communication_plus_wait_fraction_max = 100.0 * safe_ratio(
                 communication_and_wait_stats.maximum, total_stats.maximum);
             const double io_fraction_max =
                 100.0 * safe_ratio(io_stats.maximum, total_stats.maximum);
@@ -904,6 +919,9 @@ void Profiler::finalize()
                           "postprocess_max_s,communication_avg_s,communication_max_s,"
                           "synchronization_avg_s,synchronization_max_s,"
                           "communication_fraction_avg_percent,communication_fraction_max_percent,"
+                          "arrival_wait_fraction_avg_percent,arrival_wait_fraction_max_percent,"
+                          "communication_plus_wait_fraction_avg_percent,"
+                          "communication_plus_wait_fraction_max_percent,"
                           "io_avg_s,io_max_s,io_fraction_max_percent,"
                           "io_counter_available_ranks,"
                           "cache_available_ranks,cache_references_total,cache_misses_total,"
@@ -925,6 +943,9 @@ void Profiler::finalize()
                        << communication_stats.average << ',' << communication_stats.maximum << ','
                        << synchronization_stats.average << ',' << synchronization_stats.maximum << ','
                        << communication_fraction_avg << ',' << communication_fraction_max << ','
+                       << arrival_wait_fraction_avg << ',' << arrival_wait_fraction_max << ','
+                       << communication_plus_wait_fraction_avg << ','
+                       << communication_plus_wait_fraction_max << ','
                        << io_stats.average << ',' << io_stats.maximum << ',' << io_fraction_max << ','
                        << io_available_stats.average * process_count_ << ','
                        << cache_available_stats.average * process_count_ << ','
@@ -979,9 +1000,15 @@ void Profiler::finalize()
                        << total_stats.maximum << " s\n";
                 output << "Profile coverage (阶段计时覆盖率): "
                        << profile_coverage_percent << "%\n";
-                output << "Communication fraction (通信占比, avg/max): "
+                output << "Collective/communication execution fraction (通信执行占比, avg/max): "
                        << communication_fraction_avg << "% / "
                        << communication_fraction_max << "%\n";
+                output << "Collective arrival-wait fraction (集合通信到达等待占比, avg/max): "
+                       << arrival_wait_fraction_avg << "% / "
+                       << arrival_wait_fraction_max << "%\n";
+                output << "Communication + arrival wait (通信执行与到达等待合计, avg/max): "
+                       << communication_plus_wait_fraction_avg << "% / "
+                       << communication_plus_wait_fraction_max << "%\n";
                 output << "I/O max fraction (最大 I/O 占比): " << io_fraction_max << "%\n";
                 output << "Process I/O counters (/proc/self/io): available on "
                        << io_available_stats.average * process_count_ << '/'

@@ -214,6 +214,13 @@ int main(int argc, char **argv) {
     profiler.add_metadata("minh", std::to_string(minh));
     profiler.add_metadata("adjacency_enabled", isComputeAdj ? "true" : "false");
     profiler.add_metadata("save_vol", save_vol ? "true" : "false");
+    profiler.add_metadata("profiler_schema_version", "2");
+    profiler.add_metadata(
+        "collective_timing",
+        "pre_barrier_arrival_wait_then_aligned_collective_execution");
+    profiler.add_metadata(
+        "communication_fraction_definition",
+        "communication_execution_only; arrival_wait_reported_separately");
     const char *omp_threads = std::getenv("OMP_NUM_THREADS");
     profiler.add_metadata("omp_num_threads", omp_threads ? omp_threads : "unset");
 
@@ -883,7 +890,6 @@ int main(int argc, char **argv) {
         }
         //}
         if (!profiler.core_only()) {
-            scaling::StageScope profile_stage("quality_evaluation", "postprocess");
             meshQualityEvaluation(submesh, id, OUTPUT_PATH);
         }
 

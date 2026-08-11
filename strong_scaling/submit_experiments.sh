@@ -8,12 +8,12 @@ REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # default so different process counts never benchmark the shared file system at
 # the same time.  SUITE_MODE=1 runs all requested modes on the same allocation.
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPOSITORY_ROOT}/strong_scaling_results}"
-EXPERIMENT="${EXPERIMENT:-strong_scaling_core_timing_l3_r3_pp16}"
+EXPERIMENT="${EXPERIMENT:-strong_scaling_suite}"
 BATCH_ID="${BATCH_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_NAME="${RUN_NAME:-${EXPERIMENT}_${BATCH_ID}}"
 RUN_ROOT="${OUTPUT_ROOT}/${RUN_NAME}"
 PROCESS_COUNTS="${PROCESS_COUNTS:-1 8 16 32 64 128 256 512 1024 2048 4096}"
-REPEATS="${REPEATS:-3}"
+REPEATS="${REPEATS:-6}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-16}"
 PARTITION="${PARTITION:-mt_module}"
 SBATCH_COMMAND="${SBATCH_COMMAND:-yhbatch}"
@@ -21,9 +21,10 @@ SBATCH_JOB_PREFIX="${SBATCH_JOB_PREFIX:-mesh_scale}"
 SBATCH_EXTRA_ARGS="${SBATCH_EXTRA_ARGS:-}"
 DRY_RUN="${DRY_RUN:-0}"
 SERIALIZE_JOBS="${SERIALIZE_JOBS:-1}"
-SUITE_MODE="${SUITE_MODE:-0}"
-SUITE_MODES="${SUITE_MODES:-core_cache full_io}"
-PAGE_CACHE_POLICY="${PAGE_CACHE_POLICY:-observe}"
+SUITE_MODE="${SUITE_MODE:-1}"
+SUITE_MODES="${SUITE_MODES:-core_timing core_cache full_io}"
+SUITE_MODES="${SUITE_MODES//,/ }"
+PAGE_CACHE_POLICY="${PAGE_CACHE_POLICY:-evict-first}"
 PAGE_CACHE_STRICT="${PAGE_CACHE_STRICT:-0}"
 
 if [[ ! "${RUN_NAME}" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -55,11 +56,13 @@ if [[ "${SUITE_MODE}" == "1" ]]; then
         echo "[ERROR] 统一实验至少需要 REPEATS=2：第 1 次 cold（冷缓存），后续为 warm（热缓存）。" >&2
         exit 2
     fi
-    if [[ -z "${SUITE_MODES//[[:space:]]/}" ]]; then
+    read -r -a suite_modes_array <<< "${SUITE_MODES}"
+    if (( ${#suite_modes_array[@]} == 0 )); then
         echo "[ERROR] SUITE_MODES 至少需要一种模式。" >&2
         exit 2
     fi
-    for mode in ${SUITE_MODES}; do
+    seen_modes=" "
+    for mode in "${suite_modes_array[@]}"; do
         case "${mode}" in
             core_cache|core_timing|full_io) ;;
             *)
@@ -67,6 +70,11 @@ if [[ "${SUITE_MODE}" == "1" ]]; then
                 exit 2
                 ;;
         esac
+        if [[ "${seen_modes}" == *" ${mode} "* ]]; then
+            echo "[ERROR] SUITE_MODES 中存在重复模式: ${mode}" >&2
+            exit 2
+        fi
+        seen_modes+="${mode} "
     done
 fi
 if [[ "${DRY_RUN}" != "1" ]] && ! command -v "${SBATCH_COMMAND}" >/dev/null 2>&1; then
