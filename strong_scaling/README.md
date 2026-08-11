@@ -64,40 +64,27 @@ GCCHOME=/new/gcc-12 LOCAL_LIB=/new/local/lib \
 `DRY_RUN=1` 只生成计划并打印 `yhbatch` 命令，不提交作业：
 
 ```bash
-DRY_RUN=1 bash strong_scaling/submit_experiments.sh
+DRY_RUN=1 bash strong_scaling/submit_suite.sh
 ```
 
-默认规模为 `1 2 4 8 16 32 64 128 256` 个进程，每个规模重复 3 次，每节点 1 个 MPI 进程。提交脚本会为每个进程数申请一个独立 Slurm 作业；同一规模的重复实验在同一 allocation（资源分配）中完成。所有计算作业成功后，会自动启动一个单节点汇总作业。
+推荐入口的默认规模为 `1 2 4 8 16 32 64 128 256` 个进程，每个规模重复 3 次，每节点 1 个 MPI（消息传递接口）进程。提交脚本仍为每个进程数申请一个独立 Slurm 作业，但默认使用 `afterany` 依赖按 P 从小到大串行启动；因此本批实验的不同 P 不会同时争用共享文件系统。同一 P 的所有模式和重复实验在同一个 allocation（资源分配）中顺序完成，最后自动启动汇总作业。
 
-### 3.2 第一轮建议的两组实验
-
-核心算法、通信、缓存和并行效率：
+### 3.2 推荐：一次提交完整实验套件
 
 ```bash
-EXPERIMENT=wholewall_l4_r3_core_cache \
-CORE_ONLY=1 CACHE_COUNTERS=1 \
-PROCESS_COUNTS="16 32 64 128 256" REPEATS=3 \
-  bash strong_scaling/submit_experiments.sh
+bash strong_scaling/submit_suite.sh
 ```
 
-完整 I/O 路径：
+这一个命令会在每个 P 的同一批节点上依次运行：
 
-```bash
-EXPERIMENT=wholewall_l4_r3_full_io \
-CORE_ONLY=0 CACHE_COUNTERS=0 \
-PROCESS_COUNTS="16 32 64 128 256" REPEATS=3 \
-  bash strong_scaling/submit_experiments.sh
-```
+1. `core_cache`：核心路径计时、通信、并行效率和 CPU（中央处理器）硬件缓存计数；
+2. `full_io`：完整结果写出和 I/O（输入/输出）计时。
 
-为了排除硬件性能计数器本身对短任务的扰动，正式的主强扩展曲线建议再补一组：
+核心计时和硬件缓存计数由同一次 `core_cache` 运行产生，因此不再默认提交第三组实验。若需要单独标定硬件计数器开销，可覆盖 `SUITE_MODES="core_timing core_cache full_io"`；统一报告会优先使用无硬件计数器的 `core_timing` 作为主强扩展曲线。
 
-```bash
-EXPERIMENT=wholewall_l4_r3_core_timing \
-CORE_ONLY=1 CACHE_COUNTERS=0 \
-  bash strong_scaling/submit_experiments.sh
-```
+每种模式默认重复 3 次。第 1 次运行前，会在各计算节点通过 `POSIX_FADV_DONTNEED` 请求丢弃输入文件、可执行文件和动态库的 OS（操作系统）页缓存，标为 cold（冷缓存）；第 2、3 次不清理，作为 warm（热缓存），报告取其中位数。该接口只是无特权的内核提示，是否真正形成冷启动要结合报告中的 `PhysR`（物理读取量）判断。
 
-三组实验必须使用相同输入、网格参数、分区、节点类型、每节点进程数和重复次数。不要把 `CORE_ONLY=1` 与 `CORE_ONLY=0` 放入同一个 `RUN_NAME`。
+“一次提交”不是只执行一次程序：冷/热对照至少需要两次运行，而核心路径和完整 I/O 也必须分开，否则结果写出会污染通信计时。
 
 ### 3.3 常用参数
 
@@ -111,6 +98,10 @@ CORE_ONLY=1 CACHE_COUNTERS=0 \
 | `CPU_BIND` | `cores` | 将 rank（进程）绑定到 CPU 核；若该集群不接受此参数，设为 `none` |
 | `CORE_ONLY` | `1` | `1` 跳过普通结果写出，`0` 测完整 I/O |
 | `CACHE_COUNTERS` | `0` | 是否采集硬件缓存计数 |
+| `SERIALIZE_JOBS` | `1` | `1` 使不同 P 作业按依赖串行，避免本批实验相互争用共享文件系统 |
+| `SUITE_MODES` | `core_cache full_io` | 统一套件包含的模式；由 `submit_suite.sh` 使用 |
+| `PAGE_CACHE_POLICY` | 套件为 `evict-first` | `evict-first` 在每种模式的第 1 次运行前请求清理文件页缓存；`observe` 只观察首次运行 |
+| `PAGE_CACHE_STRICT` | `0` | 清缓存提示失败时是否立即终止；默认继续并把该次标为候选冷启动 |
 | `LEVELS` / `REFINES` | `2` / `2` | 表面和体网格细化次数 |
 | `MAXH` / `MINH` | `1000.0` / `0.0` | 网格尺度参数 |
 | `SBATCH_EXTRA_ARGS` | 空 | 账号、时限或集群允许的 `--exclusive` 等提交参数 |
@@ -145,32 +136,27 @@ PROCESS_COUNTS="16 32" REPEATS=1 \
 
 ## 5. 统一结果目录
 
-每次提交生成独立的 `<EXPERIMENT>_<BATCH_ID>` 目录：
+统一套件每次提交生成独立的 `<EXPERIMENT>_<BATCH_ID>` 目录：
 
 ```text
 strong_scaling_results/
-└── wholewall_l4_r3_core_cache_YYYYMMDD-HHMMSS/
+└── strong_scaling_suite_l2_r2_YYYYMMDD-HHMMSS/
     ├── run_plan.txt                 # 参数、规模与 Slurm 作业号
     ├── scheduler_logs/              # sbatch 标准输出/错误
-    ├── environment/                 # CPU/cache、模块、动态库和 git 提交
-    ├── commands/                    # 每次运行的完整可复现命令
-    ├── launcher_logs/               # 每次 yhrun 的程序输出
-    ├── status/                      # 每次运行的状态、退出码和墙钟时间
-    ├── application_output/          # CORE_ONLY=0 时的普通网格输出
-    ├── p00016/
-    │   └── repeat_01_YYYYMMDD-HHMMSS/
-    │       ├── summary.txt          # 单次实验可读摘要
-    │       ├── run_summary.csv      # 单次全局指标
-    │       ├── stages.csv           # 阶段 min/avg/max 指标
-    │       ├── rank_stages.csv      # 每进程阶段原始数据
-    │       ├── rank_metrics.csv     # 每进程网格规模与内存
-    │       └── metadata.txt
+    ├── mode_status/                 # 每个 P、每种模式的完成状态
+    ├── modes/
+    │   ├── core_cache/              # 核心、通信、并行效率和硬件缓存
+    │   │   ├── environment/         # CPU/cache、模块、动态库和 git 提交
+    │   │   ├── commands/            # 每次运行的完整可复现命令
+    │   │   ├── launcher_logs/       # 每次 yhrun 的程序输出
+    │   │   ├── page_cache_logs/     # 第 1 次运行前的页缓存准备日志
+    │   │   ├── status/              # 含 cold/warm 状态、退出码和墙钟时间
+    │   │   ├── p00016/              # profiler（性能分析器）原始结果
+    │   │   └── analysis/            # 该模式的详细阶段报告
+    │   └── full_io/                 # 相同结构；另含普通网格输出
     └── analysis/
-        ├── scaling_report.txt       # 首先阅读：加速比/效率/通信/I/O/cache
-        ├── stage_bottlenecks.txt    # 各规模最耗时的 10 个阶段
-        ├── scaling_summary.csv      # 适合绘图的强扩展汇总
-        ├── stage_scaling.csv        # 逐阶段跨规模汇总
-        └── all_runs.csv             # 所有重复实验原始总指标
+        ├── suite_report.txt         # 首先阅读：热缓存主曲线与冷/热对照
+        └── suite_summary.csv        # 核心、cache、I/O 的统一绘图数据
 ```
 
 这样每批数据、运行环境、命令、日志和分析都在同一个目录中；后续只需提供该目录，即可直接读取并比较瓶颈。
@@ -199,4 +185,6 @@ E(P)=\frac{S(P)}{P/P_0}\times100\%.
 - `Profile coverage`（计时覆盖率）之外的时间列为 `unprofiled`（未细分），可用于发现尚未插桩的路径。
 - 通信字节数是应用层缓冲区规模，不等同于网络链路上的实际流量；集合通信接收量包含本进程贡献。
 - `/proc/self/io` 用于区分逻辑和物理 I/O。逻辑读写量大、物理读写量小，通常表示页缓存或延迟写回生效。
+- 主强扩展曲线只使用 warm（第 2 次及以后）的中位数；cold（第 1 次）单列，二者不再混合计算中位数或变异系数。
+- 不同 P 默认串行可消除本批作业之间的并发竞争，但不能隔离集群上其他用户的共享文件系统负载；应同时保留作业时间、节点和调度日志。
 - `all_runs.csv` 和 `CV(%)`（变异系数）用于判断重复实验抖动；抖动大时不要只看中位数，应检查 `scheduler_logs/`、节点列表和逐 rank 数据。

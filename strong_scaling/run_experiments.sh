@@ -38,6 +38,8 @@ MAXH="${MAXH:-1000.0}"
 MINH="${MINH:-0.0}"
 CORE_ONLY="${CORE_ONLY:-1}"
 CACHE_COUNTERS="${CACHE_COUNTERS:-1}"
+PAGE_CACHE_POLICY="${PAGE_CACHE_POLICY:-observe}"
+PAGE_CACHE_STRICT="${PAGE_CACHE_STRICT:-0}"
 LAUNCHER_EXTRA_ARGS="${LAUNCHER_EXTRA_ARGS:---mpi=pmix}"
 EXTRA_APP_ARGS="${EXTRA_APP_ARGS:-}"
 ANALYZE_AFTER_RUN="${ANALYZE_AFTER_RUN:-1}"
@@ -65,12 +67,21 @@ for numeric_value in "${REPEATS}" "${RANKS_PER_NODE}"; do
         exit 2
     fi
 done
+if [[ ! "${PAGE_CACHE_POLICY}" =~ ^(observe|evict-first)$ ]]; then
+    echo "[ERROR] PAGE_CACHE_POLICY 只能是 observe 或 evict-first。" >&2
+    exit 2
+fi
+if [[ ! "${PAGE_CACHE_STRICT}" =~ ^[01]$ ]]; then
+    echo "[ERROR] PAGE_CACHE_STRICT 只能是 0 或 1。" >&2
+    exit 2
+fi
 
 mkdir -p \
     "${RUN_ROOT}/application_output" \
     "${RUN_ROOT}/commands" \
     "${RUN_ROOT}/environment" \
     "${RUN_ROOT}/launcher_logs" \
+    "${RUN_ROOT}/page_cache_logs" \
     "${RUN_ROOT}/status"
 
 if [[ "${ANALYSIS_ONLY}" == "1" ]]; then
@@ -152,6 +163,8 @@ environment_file="${RUN_ROOT}/environment/${job_tag}.txt"
     echo "omp_num_threads=${OMP_NUM_THREADS}"
     echo "core_only=${CORE_ONLY}"
     echo "cache_counters=${CACHE_COUNTERS}"
+    echo "page_cache_policy=${PAGE_CACHE_POLICY}"
+    echo "page_cache_strict=${PAGE_CACHE_STRICT}"
     echo "mesh_executable=${MESH_EXECUTABLE}"
     echo "input_mesh=${INPUT_MESH}"
     echo "levels=${LEVELS}"
@@ -206,6 +219,8 @@ if [[ ! -e "${RUN_ROOT}/run_plan.txt" ]]; then
         echo "minh=${MINH}"
         echo "core_only=${CORE_ONLY}"
         echo "cache_counters=${CACHE_COUNTERS}"
+        echo "page_cache_policy=${PAGE_CACHE_POLICY}"
+        echo "repeat_roles=repeat_01:cold repeat_02..${REPEATS}:warm"
     } > "${plan_tmp}"
     ln "${plan_tmp}" "${RUN_ROOT}/run_plan.txt" 2>/dev/null || true
     rm -f "${plan_tmp}"
@@ -214,6 +229,7 @@ fi
 echo "============================================================"
 echo "Strong scaling (强扩展) run: ${RUN_NAME}"
 echo "Processes: ${PROCESS_COUNTS}; repeats: ${REPEATS}"
+echo "Page cache (页缓存): ${PAGE_CACHE_POLICY}; repeat 1=cold, repeat 2+=warm"
 echo "Result directory: ${RUN_ROOT}"
 echo "Environment: ${environment_file}"
 echo "============================================================"
@@ -233,7 +249,17 @@ for processes in ${PROCESS_COUNTS}; do
         log_file="${RUN_ROOT}/launcher_logs/${run_tag}.log"
         command_file="${RUN_ROOT}/commands/${run_tag}.command"
         status_file="${RUN_ROOT}/status/${run_tag}.tsv"
+        page_cache_log="${RUN_ROOT}/page_cache_logs/${run_tag}.log"
         mkdir -p "${app_output}"
+
+        cache_state="warm"
+        if (( repeat == 1 )); then
+            if [[ "${PAGE_CACHE_POLICY}" == "evict-first" ]]; then
+                cache_state="cold"
+            else
+                cache_state="cold_candidate"
+            fi
+        fi
 
         launcher_command=("${LAUNCHER}")
         case "${LAUNCHER_STYLE}" in
@@ -281,19 +307,57 @@ for processes in ${PROCESS_COUNTS}; do
 
         full_command=("${launcher_command[@]}" "${application_command[@]}")
         {
-            printf '# processes=%s nodes=%s repeat=%s\n' "${processes}" "${nodes}" "${repeat}"
+            printf '# processes=%s nodes=%s repeat=%s cache_state=%s\n' \
+                "${processes}" "${nodes}" "${repeat}" "${cache_state}"
+            if (( repeat == 1 )) && [[ "${PAGE_CACHE_POLICY}" == "evict-first" ]]; then
+                printf '# page-cache preparation: same launcher + prepare_page_cache.py\n'
+            fi
             printf '%q ' "${full_command[@]}"
             printf '\n'
         } > "${command_file}"
 
-        echo "[RUN] processes=${processes} nodes=${nodes} repeat=${repeat}/${REPEATS}"
+        echo "[RUN] processes=${processes} nodes=${nodes} repeat=${repeat}/${REPEATS} cache=${cache_state}"
+
+        if (( repeat == 1 )) && [[ "${PAGE_CACHE_POLICY}" == "evict-first" ]]; then
+            page_cache_command=(
+                "${launcher_command[@]}"
+                python3 "${SCRIPT_DIR}/prepare_page_cache.py"
+                --input "${INPUT_MESH}"
+                --executable "${MESH_EXECUTABLE}"
+            )
+            {
+                printf '# page_cache_command:'
+                printf ' %q' "${page_cache_command[@]}"
+                printf '\n'
+            } >> "${command_file}"
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                printf '[DRY-RUN CACHE]'
+                printf ' %q' "${page_cache_command[@]}"
+                printf '\n'
+            else
+                echo "[CACHE] 在每个 rank 所在节点请求丢弃输入、程序和动态库页缓存。"
+                set +e
+                "${page_cache_command[@]}" 2>&1 | tee "${page_cache_log}"
+                page_cache_status=${PIPESTATUS[0]}
+                set -e
+                if (( page_cache_status != 0 )); then
+                    echo "[WARN] 页缓存准备失败，退出码 ${page_cache_status}；冷启动将仅按首次运行标记。" >&2
+                    cache_state="cold_candidate"
+                    echo "# effective_cache_state=${cache_state}" >> "${command_file}"
+                    if [[ "${PAGE_CACHE_STRICT}" == "1" ]]; then
+                        exit "${page_cache_status}"
+                    fi
+                fi
+            fi
+        fi
+
         if [[ "${DRY_RUN}" == "1" ]]; then
             printf '[DRY-RUN]'
             printf ' %q' "${full_command[@]}"
             printf '\n'
-            printf 'processes\tnodes\trepeat\tstate\texit_code\truntime_s\tlog\n' > "${status_file}"
-            printf '%s\t%s\t%s\tDRY_RUN\t0\t0\t%s\n' \
-                "${processes}" "${nodes}" "${repeat}" "${log_file}" >> "${status_file}"
+            printf 'processes\tnodes\trepeat\tcache_state\tstate\texit_code\truntime_s\tlog\n' > "${status_file}"
+            printf '%s\t%s\t%s\t%s\tDRY_RUN\t0\t0\t%s\n' \
+                "${processes}" "${nodes}" "${repeat}" "${cache_state}" "${log_file}" >> "${status_file}"
             continue
         fi
 
@@ -308,9 +372,9 @@ for processes in ${PROCESS_COUNTS}; do
         if (( run_status != 0 )); then
             state="FAILED"
         fi
-        printf 'processes\tnodes\trepeat\tstate\texit_code\truntime_s\tlog\n' > "${status_file}"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "${processes}" "${nodes}" "${repeat}" "${state}" "${run_status}" "${runtime}" "${log_file}" \
+        printf 'processes\tnodes\trepeat\tcache_state\tstate\texit_code\truntime_s\tlog\n' > "${status_file}"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "${processes}" "${nodes}" "${repeat}" "${cache_state}" "${state}" "${run_status}" "${runtime}" "${log_file}" \
             >> "${status_file}"
 
         if (( run_status != 0 )); then

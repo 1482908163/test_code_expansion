@@ -4,8 +4,9 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# One Slurm allocation is submitted per process count.  Repetitions run inside
-# the same allocation, then a dependent one-node job performs unified analysis.
+# One Slurm allocation is submitted per process count.  Jobs are serialized by
+# default so different process counts never benchmark the shared file system at
+# the same time.  SUITE_MODE=1 runs all requested modes on the same allocation.
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPOSITORY_ROOT}/strong_scaling_results}"
 EXPERIMENT="${EXPERIMENT:-strong_scaling_core_timing_l3_r3_pp16}"
 BATCH_ID="${BATCH_ID:-$(date +%Y%m%d-%H%M%S)}"
@@ -19,6 +20,11 @@ SBATCH_COMMAND="${SBATCH_COMMAND:-yhbatch}"
 SBATCH_JOB_PREFIX="${SBATCH_JOB_PREFIX:-mesh_scale}"
 SBATCH_EXTRA_ARGS="${SBATCH_EXTRA_ARGS:-}"
 DRY_RUN="${DRY_RUN:-0}"
+SERIALIZE_JOBS="${SERIALIZE_JOBS:-1}"
+SUITE_MODE="${SUITE_MODE:-0}"
+SUITE_MODES="${SUITE_MODES:-core_cache full_io}"
+PAGE_CACHE_POLICY="${PAGE_CACHE_POLICY:-observe}"
+PAGE_CACHE_STRICT="${PAGE_CACHE_STRICT:-0}"
 
 if [[ ! "${RUN_NAME}" =~ ^[A-Za-z0-9_-]+$ ]]; then
     echo "[ERROR] RUN_NAME 只能包含字母、数字、下划线和连字符。" >&2
@@ -35,6 +41,33 @@ fi
 if [[ ! "${REPEATS}" =~ ^[1-9][0-9]*$ || ! "${RANKS_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
     echo "[ERROR] REPEATS 和 RANKS_PER_NODE 必须是正整数。" >&2
     exit 2
+fi
+if [[ ! "${SERIALIZE_JOBS}" =~ ^[01]$ || ! "${SUITE_MODE}" =~ ^[01]$ || ! "${PAGE_CACHE_STRICT}" =~ ^[01]$ ]]; then
+    echo "[ERROR] SERIALIZE_JOBS、SUITE_MODE 和 PAGE_CACHE_STRICT 只能是 0 或 1。" >&2
+    exit 2
+fi
+if [[ ! "${PAGE_CACHE_POLICY}" =~ ^(observe|evict-first)$ ]]; then
+    echo "[ERROR] PAGE_CACHE_POLICY 只能是 observe 或 evict-first。" >&2
+    exit 2
+fi
+if [[ "${SUITE_MODE}" == "1" ]]; then
+    if (( REPEATS < 2 )); then
+        echo "[ERROR] 统一实验至少需要 REPEATS=2：第 1 次 cold（冷缓存），后续为 warm（热缓存）。" >&2
+        exit 2
+    fi
+    if [[ -z "${SUITE_MODES//[[:space:]]/}" ]]; then
+        echo "[ERROR] SUITE_MODES 至少需要一种模式。" >&2
+        exit 2
+    fi
+    for mode in ${SUITE_MODES}; do
+        case "${mode}" in
+            core_cache|core_timing|full_io) ;;
+            *)
+                echo "[ERROR] 不支持的 SUITE_MODES 项: ${mode}" >&2
+                exit 2
+                ;;
+        esac
+    done
 fi
 if [[ "${DRY_RUN}" != "1" ]] && ! command -v "${SBATCH_COMMAND}" >/dev/null 2>&1; then
     echo "[ERROR] 找不到 ${SBATCH_COMMAND}；请在 Slurm 登录节点运行。" >&2
@@ -62,6 +95,7 @@ export EXTRA_APP_ARGS="${EXTRA_APP_ARGS:-}"
 export CPU_BIND="${CPU_BIND:-cores}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export LOAD_CLUSTER_ENV="${LOAD_CLUSTER_ENV:-1}"
+export SERIALIZE_JOBS SUITE_MODE SUITE_MODES PAGE_CACHE_POLICY PAGE_CACHE_STRICT
 
 {
     echo "Strong Scaling Submission Plan (强扩展提交计划)"
@@ -74,6 +108,7 @@ export LOAD_CLUSTER_ENV="${LOAD_CLUSTER_ENV:-1}"
     echo "result_directory=${RUN_ROOT}"
     echo "process_counts=${PROCESS_COUNTS}"
     echo "repeats=${REPEATS}"
+    echo "repeat_roles=repeat_01:cold repeat_02..${REPEATS}:warm"
     echo "ranks_per_node=${RANKS_PER_NODE}"
     echo "partition=${PARTITION}"
     echo "mesh_executable=${MESH_EXECUTABLE}"
@@ -82,8 +117,19 @@ export LOAD_CLUSTER_ENV="${LOAD_CLUSTER_ENV:-1}"
     echo "refines=${REFINES}"
     echo "maxh=${MAXH}"
     echo "minh=${MINH}"
-    echo "core_only=${CORE_ONLY}"
-    echo "cache_counters=${CACHE_COUNTERS}"
+    if [[ "${SUITE_MODE}" == "1" ]]; then
+        echo "core_only=per-mode"
+        echo "cache_counters=per-mode"
+    else
+        echo "core_only=${CORE_ONLY}"
+        echo "cache_counters=${CACHE_COUNTERS}"
+    fi
+    echo "suite_mode=${SUITE_MODE}"
+    echo "suite_modes=${SUITE_MODES}"
+    echo "serialize_jobs=${SERIALIZE_JOBS}"
+    echo "dependency_policy=afterany"
+    echo "page_cache_policy=${PAGE_CACHE_POLICY}"
+    echo "page_cache_strict=${PAGE_CACHE_STRICT}"
     echo "launcher=${LAUNCHER}"
     echo "launcher_extra_args=${LAUNCHER_EXTRA_ARGS}"
     echo "cpu_bind=${CPU_BIND}"
@@ -97,6 +143,8 @@ export LOAD_CLUSTER_ENV="${LOAD_CLUSTER_ENV:-1}"
 } > "${RUN_ROOT}/run_plan.txt"
 
 job_ids=()
+previous_job_id=""
+previous_process=""
 for processes in ${PROCESS_COUNTS}; do
     if (( processes <= 0 )); then
         echo "[ERROR] 非法进程数: ${processes}" >&2
@@ -104,6 +152,13 @@ for processes in ${PROCESS_COUNTS}; do
     fi
     nodes=$(( (processes + RANKS_PER_NODE - 1) / RANKS_PER_NODE ))
     process_tag=$(printf 'p%05d' "${processes}")
+    compute_script="${SCRIPT_DIR}/run_experiments.sh"
+    export_spec="ALL,STRONG_SCALING_DIR=${SCRIPT_DIR},PROCESS_COUNTS=${processes},ANALYZE_AFTER_RUN=0,ANALYSIS_ONLY=0,DRY_RUN=0"
+    if [[ "${SUITE_MODE}" == "1" ]]; then
+        compute_script="${SCRIPT_DIR}/run_suite_process.sh"
+        export_spec+=",SUITE_ROOT=${RUN_ROOT},SUITE_NAME=${RUN_NAME}"
+    fi
+
     submit_command=(
         "${SBATCH_COMMAND}"
         --parsable
@@ -115,14 +170,21 @@ for processes in ${PROCESS_COUNTS}; do
         --cpus-per-task=1
         --output="${RUN_ROOT}/scheduler_logs/${process_tag}_%j.out"
         --error="${RUN_ROOT}/scheduler_logs/${process_tag}_%j.err"
-        --export="ALL,STRONG_SCALING_DIR=${SCRIPT_DIR},PROCESS_COUNTS=${processes},ANALYZE_AFTER_RUN=0,ANALYSIS_ONLY=0,DRY_RUN=0"
+        --export="${export_spec}"
     )
-    submit_command+=( "${sbatch_extra[@]}" "${SCRIPT_DIR}/run_experiments.sh" )
+    if [[ "${SERIALIZE_JOBS}" == "1" && -n "${previous_job_id}" ]]; then
+        submit_command+=( --dependency="afterany:${previous_job_id}" )
+    fi
+    submit_command+=( "${sbatch_extra[@]}" "${compute_script}" )
 
     printf '[SUBMIT] processes=%s nodes=%s:' "${processes}" "${nodes}"
     printf ' %q' "${submit_command[@]}"
     printf '\n'
     if [[ "${DRY_RUN}" == "1" ]]; then
+        if [[ "${SERIALIZE_JOBS}" == "1" && -n "${previous_process}" ]]; then
+            echo "[ORDER] P=${processes} 将在 P=${previous_process} 结束后启动。"
+        fi
+        previous_process="${processes}"
         continue
     fi
 
@@ -133,6 +195,7 @@ for processes in ${PROCESS_COUNTS}; do
         exit 2
     fi
     job_ids+=("${job_id}")
+    previous_job_id="${job_id}"
     echo "[QUEUED] ${process_tag} -> job ${job_id}"
 done
 
@@ -141,10 +204,21 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     exit 0
 fi
 
-dependency="afterok"
-for job_id in "${job_ids[@]}"; do
-    dependency+=":${job_id}"
-done
+if [[ "${SERIALIZE_JOBS}" == "1" ]]; then
+    dependency="afterany:${previous_job_id}"
+else
+    dependency="afterany"
+    for job_id in "${job_ids[@]}"; do
+        dependency+=":${job_id}"
+    done
+fi
+
+analysis_script="${SCRIPT_DIR}/run_experiments.sh"
+analysis_export="ALL,STRONG_SCALING_DIR=${SCRIPT_DIR},ANALYSIS_ONLY=1,ANALYZE_AFTER_RUN=1,LOAD_CLUSTER_ENV=0,DRY_RUN=0"
+if [[ "${SUITE_MODE}" == "1" ]]; then
+    analysis_script="${SCRIPT_DIR}/run_suite_analysis.sh"
+    analysis_export="ALL,STRONG_SCALING_DIR=${SCRIPT_DIR},SUITE_ROOT=${RUN_ROOT},LOAD_CLUSTER_ENV=0"
+fi
 
 analysis_command=(
     "${SBATCH_COMMAND}"
@@ -157,9 +231,9 @@ analysis_command=(
     --dependency="${dependency}"
     --output="${RUN_ROOT}/scheduler_logs/analysis_%j.out"
     --error="${RUN_ROOT}/scheduler_logs/analysis_%j.err"
-    --export="ALL,STRONG_SCALING_DIR=${SCRIPT_DIR},ANALYSIS_ONLY=1,ANALYZE_AFTER_RUN=1,LOAD_CLUSTER_ENV=0,DRY_RUN=0"
+    --export="${analysis_export}"
 )
-analysis_command+=( "${sbatch_extra[@]}" "${SCRIPT_DIR}/run_experiments.sh" )
+analysis_command+=( "${sbatch_extra[@]}" "${analysis_script}" )
 analysis_result=$("${analysis_command[@]}")
 analysis_job_id="${analysis_result%%;*}"
 
@@ -174,5 +248,9 @@ echo "============================================================"
 echo "已提交计算作业: ${job_ids[*]}"
 echo "自动汇总作业: ${analysis_job_id}"
 echo "统一结果目录: ${RUN_ROOT}"
-echo "完成后先看: ${RUN_ROOT}/analysis/scaling_report.txt"
+if [[ "${SUITE_MODE}" == "1" ]]; then
+    echo "完成后先看: ${RUN_ROOT}/analysis/suite_report.txt"
+else
+    echo "完成后先看: ${RUN_ROOT}/analysis/scaling_report.txt"
+fi
 echo "============================================================"

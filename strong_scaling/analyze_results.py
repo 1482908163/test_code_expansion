@@ -100,6 +100,44 @@ def format_number(value: float, width: int = 10, precision: int = 3) -> str:
     return f"{value:>{width}.{precision}f}"
 
 
+def read_plan_value(experiment_dir: Path, key: str, default: str = "unknown") -> str:
+    path = experiment_dir / "run_plan.txt"
+    if not path.is_file():
+        return default
+    prefix = f"{key}="
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.startswith(prefix):
+                return line[len(prefix) :].strip()
+    return default
+
+
+def read_cache_states(experiment_dir: Path) -> dict[tuple[int, int], str]:
+    """Read the effective cache label written after cache preparation.
+
+    Older result directories have no cache_state column.  Their first run is
+    therefore handled as a cold candidate rather than silently promoted to a
+    controlled cold run.
+    """
+
+    states: dict[tuple[int, int], str] = {}
+    status_dir = experiment_dir / "status"
+    if not status_dir.is_dir():
+        return states
+    for path in sorted(status_dir.glob("*.tsv")):
+        with path.open(newline="", encoding="utf-8") as stream:
+            for row in csv.DictReader(stream, delimiter="\t"):
+                state = row.get("cache_state", "")
+                if state not in {"cold", "cold_candidate", "warm"}:
+                    continue
+                try:
+                    key = (int(row["processes"]), int(row["repeat"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                states[key] = state
+    return states
+
+
 def main() -> None:
     args = parse_args()
     experiment_dir = args.experiment_dir.resolve()
@@ -180,6 +218,139 @@ def main() -> None:
         )
         summary_rows.append(result)
 
+    page_cache_policy = read_plan_value(experiment_dir, "page_cache_policy", "observe")
+    recorded_cache_states = read_cache_states(experiment_dir)
+    cold_rows_by_process: dict[int, list[dict[str, str]]] = {}
+    warm_rows_by_process: dict[int, list[dict[str, str]]] = {}
+    for processes, rows in grouped.items():
+        cold_rows_by_process[processes] = [
+            row for row in rows if int(row["repeat"]) == 1
+        ]
+        warm_rows_by_process[processes] = [
+            row for row in rows if int(row["repeat"]) > 1
+        ]
+
+    cold_base_time = median_field(
+        cold_rows_by_process[base_processes], "total_wall_max_s"
+    )
+    warm_base_time = median_field(
+        warm_rows_by_process[base_processes], "total_wall_max_s"
+    )
+    cold_warm_rows: list[dict[str, float | int | str]] = []
+    for processes in process_counts:
+        cold_rows = cold_rows_by_process[processes]
+        warm_rows = warm_rows_by_process[processes]
+        cold_time = median_field(cold_rows, "total_wall_max_s")
+        warm_time = median_field(warm_rows, "total_wall_max_s")
+        ideal_speedup = processes / base_processes
+        cold_speedup = (
+            cold_base_time / cold_time
+            if math.isfinite(cold_base_time) and cold_time > 0.0
+            else math.nan
+        )
+        warm_speedup = (
+            warm_base_time / warm_time
+            if math.isfinite(warm_base_time) and warm_time > 0.0
+            else math.nan
+        )
+        cold_cache_rows = [
+            row
+            for row in cold_rows
+            if numeric(row, "cache_available_ranks") >= processes
+        ]
+        warm_cache_rows = [
+            row
+            for row in warm_rows
+            if numeric(row, "cache_available_ranks") >= processes
+        ]
+        cold_io_rows = [
+            row
+            for row in cold_rows
+            if numeric(row, "io_counter_available_ranks") >= processes
+        ]
+        warm_io_rows = [
+            row
+            for row in warm_rows
+            if numeric(row, "io_counter_available_ranks") >= processes
+        ]
+        fallback_cold_state = (
+            "cold" if page_cache_policy == "evict-first" else "cold_candidate"
+        )
+        effective_cold_states = {
+            recorded_cache_states.get(
+                (processes, int(row["repeat"])), fallback_cold_state
+            )
+            for row in cold_rows
+        }
+        cold_cache_state = (
+            "cold" if effective_cold_states == {"cold"} else "cold_candidate"
+        )
+        cold_warm_rows.append(
+            {
+                "experiment": cold_rows[0]["experiment"] if cold_rows else warm_rows[0]["experiment"],
+                "processes": processes,
+                "page_cache_policy": page_cache_policy,
+                "cold_cache_state": cold_cache_state,
+                "cold_repetitions": len(cold_rows),
+                "warm_repetitions": len(warm_rows),
+                "cold_total_wall_max_s": cold_time,
+                "warm_total_wall_max_s": warm_time,
+                "cold_over_warm": (
+                    cold_time / warm_time
+                    if cold_time > 0.0 and warm_time > 0.0
+                    else math.nan
+                ),
+                "cold_penalty_percent": (
+                    100.0 * (cold_time / warm_time - 1.0)
+                    if cold_time > 0.0 and warm_time > 0.0
+                    else math.nan
+                ),
+                "cold_speedup": cold_speedup,
+                "warm_speedup": warm_speedup,
+                "cold_parallel_efficiency_percent": 100.0 * cold_speedup / ideal_speedup,
+                "warm_parallel_efficiency_percent": 100.0 * warm_speedup / ideal_speedup,
+                "warm_total_time_cv_percent": coefficient_of_variation(
+                    numeric(row, "total_wall_max_s") for row in warm_rows
+                ),
+                "cold_communication_max_s": median_field(cold_rows, "communication_max_s"),
+                "warm_communication_max_s": median_field(warm_rows, "communication_max_s"),
+                "cold_communication_fraction_max_percent": median_field(
+                    cold_rows, "communication_fraction_max_percent"
+                ),
+                "warm_communication_fraction_max_percent": median_field(
+                    warm_rows, "communication_fraction_max_percent"
+                ),
+                "cold_io_max_s": median_field(cold_rows, "io_max_s"),
+                "warm_io_max_s": median_field(warm_rows, "io_max_s"),
+                "cold_io_fraction_max_percent": median_field(
+                    cold_rows, "io_fraction_max_percent"
+                ),
+                "warm_io_fraction_max_percent": median_field(
+                    warm_rows, "io_fraction_max_percent"
+                ),
+                "cold_physical_read_total_bytes": median_field(
+                    cold_io_rows, "physical_read_total_bytes"
+                ),
+                "warm_physical_read_total_bytes": median_field(
+                    warm_io_rows, "physical_read_total_bytes"
+                ),
+                "cold_physical_write_total_bytes": median_field(
+                    cold_io_rows, "physical_write_total_bytes"
+                ),
+                "warm_physical_write_total_bytes": median_field(
+                    warm_io_rows, "physical_write_total_bytes"
+                ),
+                "cold_cache_miss_rate_percent": median_field(
+                    cold_cache_rows, "cache_miss_rate_percent"
+                ),
+                "warm_cache_miss_rate_percent": median_field(
+                    warm_cache_rows, "cache_miss_rate_percent"
+                ),
+                "cold_ipc": median_field(cold_cache_rows, "ipc"),
+                "warm_ipc": median_field(warm_cache_rows, "ipc"),
+            }
+        )
+
     summary_fields = [
         "experiment",
         "processes",
@@ -222,6 +393,14 @@ def main() -> None:
         writer.writeheader()
         for row in summary_rows:
             writer.writerow({key: row.get(key, "") for key in summary_fields})
+
+    cold_warm_fields = list(cold_warm_rows[0].keys()) if cold_warm_rows else []
+    with (output_dir / "cold_warm_summary.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=cold_warm_fields)
+        writer.writeheader()
+        writer.writerows(cold_warm_rows)
 
     raw_fields = list(runs[0].keys())
     with (output_dir / "all_runs.csv").open("w", newline="", encoding="utf-8") as stream:
@@ -367,7 +546,39 @@ def main() -> None:
         output.write("  scaling_summary.csv  各进程数的中位数、加速比和并行效率\n")
         output.write("  stage_scaling.csv    各进程数逐阶段的中位数指标\n")
         output.write("  all_runs.csv         所有重复实验的原始总指标\n")
+        output.write("  cold_warm_summary.csv  冷/热页缓存分离汇总\n")
+        output.write("  cold_warm_report.txt   冷/热页缓存可读报告\n")
         output.write("  scaling_report.txt   本文件\n")
+
+    with (output_dir / "cold_warm_report.txt").open("w", encoding="utf-8") as output:
+        output.write("Cold/Warm Page-cache Summary (冷/热页缓存汇总)\n")
+        output.write("=" * 123 + "\n")
+        output.write(f"Experiment (实验): {runs[0]['experiment']}\n")
+        output.write(f"Page-cache policy (页缓存策略): {page_cache_policy}\n")
+        output.write(
+            "Cold 使用 repeat 1；Warm 使用 repeat 2+ 的中位数。"
+            "cold_candidate 表示没有成功清缓存的证据。POSIX_FADV_DONTNEED 是内核提示，"
+            "是否真正冷启动应结合 PhysR 判断。\n\n"
+        )
+        output.write(
+            f"{'P':>7} {'ColdState':>14} {'Cold(s)':>11} {'Warm(s)':>11} {'Penalty(%)':>12} "
+            f"{'ColdEff(%)':>12} {'WarmEff(%)':>12} {'ColdPhysR(GiB)':>16} "
+            f"{'WarmPhysR(GiB)':>16} {'WarmCV(%)':>11}\n"
+        )
+        output.write("-" * 123 + "\n")
+        for row in cold_warm_rows:
+            output.write(
+                f"{int(row['processes']):>7}"
+                f"{str(row['cold_cache_state']):>14}"
+                f"{format_number(float(row['cold_total_wall_max_s']), 11)}"
+                f"{format_number(float(row['warm_total_wall_max_s']), 11)}"
+                f"{format_number(float(row['cold_penalty_percent']), 12, 2)}"
+                f"{format_number(float(row['cold_parallel_efficiency_percent']), 12, 2)}"
+                f"{format_number(float(row['warm_parallel_efficiency_percent']), 12, 2)}"
+                f"{format_number(float(row['cold_physical_read_total_bytes']) / (1024**3), 16, 3)}"
+                f"{format_number(float(row['warm_physical_read_total_bytes']) / (1024**3), 16, 3)}"
+                f"{format_number(float(row['warm_total_time_cv_percent']), 11, 2)}\n"
+            )
 
     scaling_by_process = {int(row["processes"]): row for row in summary_rows}
     with (output_dir / "stage_bottlenecks.txt").open("w", encoding="utf-8") as output:
