@@ -11,4 +11,4 @@ __pycache__/
 *.log
 *.tmp
 .vscode/
-strong_scaling_results/
+

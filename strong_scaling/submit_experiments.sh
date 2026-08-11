@@ -7,15 +7,15 @@ REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # One Slurm allocation is submitted per process count.  Repetitions run inside
 # the same allocation, then a dependent one-node job performs unified analysis.
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPOSITORY_ROOT}/strong_scaling_results}"
-EXPERIMENT="${EXPERIMENT:-wholewall_l4_r3_core}"
+EXPERIMENT="${EXPERIMENT:-strong_scaling_core_timing_l2_r2}"
 BATCH_ID="${BATCH_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_NAME="${RUN_NAME:-${EXPERIMENT}_${BATCH_ID}}"
 RUN_ROOT="${OUTPUT_ROOT}/${RUN_NAME}"
-PROCESS_COUNTS="${PROCESS_COUNTS:-16 32 64 128 256}"
+PROCESS_COUNTS="${PROCESS_COUNTS:-1 2 4 8 16 32 64 128 256}"
 REPEATS="${REPEATS:-3}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-1}"
 PARTITION="${PARTITION:-mt_module}"
-SBATCH_COMMAND="${SBATCH_COMMAND:-sbatch}"
+SBATCH_COMMAND="${SBATCH_COMMAND:-yhbatch}"
 SBATCH_JOB_PREFIX="${SBATCH_JOB_PREFIX:-mesh_scale}"
 SBATCH_EXTRA_ARGS="${SBATCH_EXTRA_ARGS:-}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -49,12 +49,12 @@ read -r -a sbatch_extra <<< "${SBATCH_EXTRA_ARGS}"
 export OUTPUT_ROOT EXPERIMENT BATCH_ID RUN_NAME REPEATS RANKS_PER_NODE PARTITION
 export MESH_EXECUTABLE="${MESH_EXECUTABLE:-${REPOSITORY_ROOT}/build/mesh_occ_mpi/mesh_occ_mpi}"
 export INPUT_MESH="${INPUT_MESH:-${REPOSITORY_ROOT}/inputData/wholewall3solid.STEP}"
-export LEVELS="${LEVELS:-4}"
-export REFINES="${REFINES:-3}"
+export LEVELS="${LEVELS:-2}"
+export REFINES="${REFINES:-2}"
 export MAXH="${MAXH:-1000.0}"
 export MINH="${MINH:-0.0}"
 export CORE_ONLY="${CORE_ONLY:-1}"
-export CACHE_COUNTERS="${CACHE_COUNTERS:-1}"
+export CACHE_COUNTERS="${CACHE_COUNTERS:-0}"
 export LAUNCHER_STYLE="${LAUNCHER_STYLE:-yhrun}"
 export LAUNCHER="${LAUNCHER:-${LAUNCHER_STYLE}}"
 export LAUNCHER_EXTRA_ARGS="${LAUNCHER_EXTRA_ARGS:---mpi=pmix}"
@@ -115,7 +115,7 @@ for processes in ${PROCESS_COUNTS}; do
         --cpus-per-task=1
         --output="${RUN_ROOT}/scheduler_logs/${process_tag}_%j.out"
         --error="${RUN_ROOT}/scheduler_logs/${process_tag}_%j.err"
-        --export="ALL,PROCESS_COUNTS=${processes},ANALYZE_AFTER_RUN=0,ANALYSIS_ONLY=0,DRY_RUN=0"
+        --export="ALL,STRONG_SCALING_DIR=${SCRIPT_DIR},PROCESS_COUNTS=${processes},ANALYZE_AFTER_RUN=0,ANALYSIS_ONLY=0,DRY_RUN=0"
     )
     submit_command+=( "${sbatch_extra[@]}" "${SCRIPT_DIR}/run_experiments.sh" )
 
@@ -157,7 +157,7 @@ analysis_command=(
     --dependency="${dependency}"
     --output="${RUN_ROOT}/scheduler_logs/analysis_%j.out"
     --error="${RUN_ROOT}/scheduler_logs/analysis_%j.err"
-    --export="ALL,ANALYSIS_ONLY=1,ANALYZE_AFTER_RUN=1,LOAD_CLUSTER_ENV=0,DRY_RUN=0"
+    --export="ALL,STRONG_SCALING_DIR=${SCRIPT_DIR},ANALYSIS_ONLY=1,ANALYZE_AFTER_RUN=1,LOAD_CLUSTER_ENV=0,DRY_RUN=0"
 )
 analysis_command+=( "${sbatch_extra[@]}" "${SCRIPT_DIR}/run_experiments.sh" )
 analysis_result=$("${analysis_command[@]}")

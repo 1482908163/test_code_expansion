@@ -13,12 +13,11 @@ export PROJECT_ROOT="${PROJECT_ROOT:-${REPOSITORY_ROOT}}"
 export PROJ_DIR="${PROJ_DIR:-${PROJECT_ROOT}}"
 export GCCHOME="${GCCHOME:-/vol8/home/hnu_lhz/cjz/gcc-12}"
 export LOCAL_LIB="${LOCAL_LIB:-/vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu}"
-export AARCH64_LIB="${AARCH64_LIB:-/vol8/home/hnu_lhz/cjz/aarch64-linux-gnu}"
 export SYSTEM_AARCH64_LIB="${SYSTEM_AARCH64_LIB:-/usr/lib/aarch64-linux-gnu}"
 export NETGEN_INSTALL_LIB="${NETGEN_INSTALL_LIB:-/vol8/home/hnu_lhz/cjz/NETGEN/install/lib}"
-export EXTRA_INSTALL_LIB="${EXTRA_INSTALL_LIB:-/vol8/home/hnu_lhz/cjz/install_libs/lib}"
 export MPI_X_LIB="${MPI_X_LIB:-/vol8/appsoftware/mpi-x/lib}"
 export MPI_MODULE="${MPI_MODULE:-mpich/mpi-x}"
+export EXPECTED_PMIX_LIB_PREFIX="${EXPECTED_PMIX_LIB_PREFIX:-/usr/lib}"
 
 LOAD_MODULES="${LOAD_MODULES:-1}"
 SANITIZE_MPI_ENV="${SANITIZE_MPI_ENV:-1}"
@@ -90,19 +89,16 @@ if [[ "${SANITIZE_MPI_ENV}" == "1" ]]; then
 fi
 
 scaling_prepend_path PATH "${GCCHOME}/bin"
-scaling_prepend_path LIBRARY_PATH "${SYSTEM_AARCH64_LIB}"
-scaling_prepend_path LIBRARY_PATH "${LOCAL_LIB}"
-scaling_prepend_path LD_LIBRARY_PATH "${MPI_X_LIB}"
-scaling_prepend_path LD_LIBRARY_PATH "${EXTRA_INSTALL_LIB}"
-scaling_prepend_path LD_LIBRARY_PATH "${AARCH64_LIB}"
-scaling_prepend_path LD_LIBRARY_PATH "${SYSTEM_AARCH64_LIB}"
-scaling_prepend_path LD_LIBRARY_PATH "${LOCAL_LIB}"
-scaling_prepend_path LD_LIBRARY_PATH "${NETGEN_INSTALL_LIB}"
-scaling_prepend_path LD_LIBRARY_PATH "${GCCHOME}/lib64"
+
+# Match the proven test_code_part03/cjz_nodsp_copy.sh runtime exactly.  Assign
+# these paths instead of extending an inherited login-node environment: the
+# latter previously selected /vol8/home/hnu_lhz/cjz/aarch64-linux-gnu/
+# libpmix.so.2 together with MPI-X libmpi.so.12 and broke PMIx BFROPS loading.
+export LIBRARY_PATH="${LOCAL_LIB}:${SYSTEM_AARCH64_LIB}:${MPI_X_LIB}"
+export LD_LIBRARY_PATH="${GCCHOME}/lib64:${NETGEN_INSTALL_LIB}:${LOCAL_LIB}:${SYSTEM_AARCH64_LIB}:${MPI_X_LIB}"
 
 # Force MPICH compiler wrappers to use the same GCC 12 toolchain as the
 # runtime, avoiding libstdc++ ABI mismatches.
 export MPICH_CC="${MPICH_CC:-${GCCHOME}/bin/gcc}"
 export MPICH_CXX="${MPICH_CXX:-${GCCHOME}/bin/g++}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
-

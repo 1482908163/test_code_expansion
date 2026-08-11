@@ -17,15 +17,17 @@
 |---|---|
 | `module purge; module load mpich/mpi-x` | `MPI_MODULE=mpich/mpi-x` |
 | GCC 12 和 MPICH wrapper | `GCCHOME`、`MPICH_CC`、`MPICH_CXX` |
-| AArch64、Netgen、本地库路径 | 统一由 `cluster_env.sh` 设置 |
+| 系统 AArch64、Netgen、本地库路径 | 统一由 `cluster_env.sh` 设置，不继承登录节点的动态库路径 |
 | `yhrun --mpi=pmix` | `LAUNCHER=yhrun`、`LAUNCHER_EXTRA_ARGS=--mpi=pmix` |
 | `mt_module` 分区 | `PARTITION=mt_module` |
 | 每节点/每任务 1 个进程和线程 | `RANKS_PER_NODE=1`、`OMP_NUM_THREADS=1` |
 | `wholewall3solid.STEP` | `<当前仓库>/inputData/wholewall3solid.STEP` |
-| `numlevels=4, numrefine=3` | `LEVELS=4`、`REFINES=3` |
+| 当前强扩展参数 | `LEVELS=2`、`REFINES=2` |
 | `maxh=1000, minh=0` | `MAXH=1000.0`、`MINH=0.0` |
 
 仓库目录不再硬编码为 `test_code_time`：编译、可执行文件、输入和结果路径均从当前 checkout（检出的仓库）自动推导。第三方库路径仍保留集群上的现有默认值，需要时可通过同名环境变量覆盖。
+
+运行环境以已验证的 `test_code_part03/cjz_nodsp_copy.sh` 为基准。`LD_LIBRARY_PATH` 会被设置为确定值，不会继承提交节点中的旧 MPI/PMIx 路径；尤其不得加入 `/vol8/home/hnu_lhz/cjz/aarch64-linux-gnu`，否则会混用该目录下的 `libpmix.so.2` 与 MPI-X 的 `libmpi.so.12`。计算作业会在启动 `yhrun` 前用 `ldd` 验证二者来源。
 
 ## 2. 编译插桩版本
 
@@ -59,13 +61,13 @@ GCCHOME=/new/gcc-12 LOCAL_LIB=/new/local/lib \
 
 ### 3.1 先检查提交命令
 
-`DRY_RUN=1` 只生成计划并打印 `sbatch` 命令，不提交作业：
+`DRY_RUN=1` 只生成计划并打印 `yhbatch` 命令，不提交作业：
 
 ```bash
 DRY_RUN=1 bash strong_scaling/submit_experiments.sh
 ```
 
-默认规模为 `16 32 64 128 256` 个进程，每个规模重复 3 次，每节点 1 个 MPI 进程。提交脚本会为每个进程数申请一个独立 Slurm 作业；同一规模的重复实验在同一 allocation（资源分配）中完成。所有计算作业成功后，会自动启动一个单节点汇总作业。
+默认规模为 `1 2 4 8 16 32 64 128 256` 个进程，每个规模重复 3 次，每节点 1 个 MPI 进程。提交脚本会为每个进程数申请一个独立 Slurm 作业；同一规模的重复实验在同一 allocation（资源分配）中完成。所有计算作业成功后，会自动启动一个单节点汇总作业。
 
 ### 3.2 第一轮建议的两组实验
 
@@ -101,15 +103,15 @@ CORE_ONLY=1 CACHE_COUNTERS=0 \
 
 | 变量 | 默认值 | 含义 |
 |---|---:|---|
-| `PROCESS_COUNTS` | `16 32 64 128 256` | MPI 进程数序列 |
+| `PROCESS_COUNTS` | `1 2 4 8 16 32 64 128 256` | MPI 进程数序列 |
 | `REPEATS` | `3` | 每个规模的重复次数 |
 | `RANKS_PER_NODE` | `1` | 每节点 MPI 进程数 |
 | `PARTITION` | `mt_module` | Slurm 分区 |
 | `LAUNCHER_EXTRA_ARGS` | `--mpi=pmix` | `yhrun` 的附加参数 |
 | `CPU_BIND` | `cores` | 将 rank（进程）绑定到 CPU 核；若该集群不接受此参数，设为 `none` |
 | `CORE_ONLY` | `1` | `1` 跳过普通结果写出，`0` 测完整 I/O |
-| `CACHE_COUNTERS` | `1` | 是否采集硬件缓存计数 |
-| `LEVELS` / `REFINES` | `4` / `3` | 表面和体网格细化次数 |
+| `CACHE_COUNTERS` | `0` | 是否采集硬件缓存计数 |
+| `LEVELS` / `REFINES` | `2` / `2` | 表面和体网格细化次数 |
 | `MAXH` / `MINH` | `1000.0` / `0.0` | 网格尺度参数 |
 | `SBATCH_EXTRA_ARGS` | 空 | 账号、时限或集群允许的 `--exclusive` 等提交参数 |
 | `OUTPUT_ROOT` | `<仓库>/strong_scaling_results` | 所有实验结果根目录 |

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# sbatch/yhbatch may copy this file to a per-job spool directory before
+# execution.  In that case BASH_SOURCE[0] points at the copied slurm_script,
+# so use the original directory explicitly exported by the submitter.
+SCRIPT_DIR="$(cd "${STRONG_SCALING_DIR:-$(dirname "${BASH_SOURCE[0]}")}" && pwd)"
 REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Use the same compiler/MPI/runtime libraries as build_project.sh and
@@ -22,15 +25,15 @@ RUN_ROOT="${OUTPUT_ROOT}/${RUN_NAME}"
 
 # Defaults follow cjz_nodsp_copy.sh and the 16--256 process experiment shown
 # in the reference figure.  Every value can still be overridden at launch.
-PROCESS_COUNTS="${PROCESS_COUNTS:-16 32 64 128 256}"
+PROCESS_COUNTS="${PROCESS_COUNTS:-1 2 4 8 16 32 64 128 256}"
 REPEATS="${REPEATS:-3}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-1}"
 LAUNCHER_STYLE="${LAUNCHER_STYLE:-yhrun}"
 LAUNCHER="${LAUNCHER:-${LAUNCHER_STYLE}}"
 PARTITION="${PARTITION:-mt_module}"
 CPU_BIND="${CPU_BIND:-cores}"
-LEVELS="${LEVELS:-4}"
-REFINES="${REFINES:-3}"
+LEVELS="${LEVELS:-2}"
+REFINES="${REFINES:-2}"
 MAXH="${MAXH:-1000.0}"
 MINH="${MINH:-0.0}"
 CORE_ONLY="${CORE_ONLY:-1}"
@@ -95,6 +98,38 @@ fi
 
 read -r -a launcher_extra <<< "${LAUNCHER_EXTRA_ARGS}"
 read -r -a app_extra <<< "${EXTRA_APP_ARGS}"
+
+validate_mpi_runtime()
+{
+    local dependency_output mpi_library pmix_library
+
+    dependency_output="$(ldd "${MESH_EXECUTABLE}")"
+    mpi_library="$(awk '$1 ~ /^libmpi[.]so/ && $2 == "=>" { print $3; exit }' <<< "${dependency_output}")"
+    pmix_library="$(awk '$1 ~ /^libpmix[.]so/ && $2 == "=>" { print $3; exit }' <<< "${dependency_output}")"
+
+    if [[ -z "${mpi_library}" || -z "${pmix_library}" ]]; then
+        echo "[ERROR] 无法从 ldd 输出中解析 libmpi/libpmix；请检查可执行文件的 MPI 链接。" >&2
+        return 1
+    fi
+    if [[ "${mpi_library}" != "${MPI_X_LIB}/"* ]]; then
+        echo "[ERROR] MPI 运行库不属于 MPI-X: ${mpi_library}" >&2
+        echo "        期望目录: ${MPI_X_LIB}" >&2
+        return 1
+    fi
+    if [[ "${pmix_library}" != "${EXPECTED_PMIX_LIB_PREFIX}/"* ]]; then
+        echo "[ERROR] PMIx 运行库来源异常: ${pmix_library}" >&2
+        echo "        期望系统 PMIx 目录: ${EXPECTED_PMIX_LIB_PREFIX}" >&2
+        echo "        请勿将 /vol8/home/hnu_lhz/cjz/aarch64-linux-gnu 加入 LD_LIBRARY_PATH。" >&2
+        return 1
+    fi
+
+    echo "[ENV-OK] libmpi=${mpi_library}"
+    echo "[ENV-OK] libpmix=${pmix_library}"
+}
+
+if [[ "${DRY_RUN}" != "1" && "${LOAD_CLUSTER_ENV}" == "1" ]]; then
+    validate_mpi_runtime
+fi
 
 job_tag="job_${SLURM_JOB_ID:-local}_$(date +%Y%m%d-%H%M%S)_$$"
 environment_file="${RUN_ROOT}/environment/${job_tag}.txt"
