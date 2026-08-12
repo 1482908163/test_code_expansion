@@ -3,8 +3,10 @@
 #include <math.h>
 #include <iostream>
 #include <vector>
+#include <limits>
 #include "3DNgmesher.h"
 #include "scaling_profiler.h"
+#include "mpi_debug.h"
 #include <string>
 #include <time.h>
 
@@ -1105,30 +1107,20 @@ int com_sr_datatype(
 	{
 		rc = MPI_Isend(s_data[i], s_length[i], datatype, dest[i], mypid, comm,
 					   &(req[i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_datatype/MPI_Isend");
 	}
 	for (i = 0; i < num_r; i++)
 	{
 		rc = MPI_Irecv(r_data[i], r_length[i], datatype, src[i], src[i], comm,
 					   &(req[num_s + i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_datatype/MPI_Irecv");
 	}
 	if (num_s + num_r)
 	{
+		netgen_mpi_checkpoint(comm, "com_sr_datatype.waitall.begin", num_s, num_r);
 		rc = MPI_Waitall(num_s + num_r, req, stat);
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_datatype/MPI_Waitall");
+		netgen_mpi_checkpoint(comm, "com_sr_datatype.waitall.end", num_s, num_r);
 	}
 	free(req);
 	free(stat);
@@ -1163,30 +1155,20 @@ int com_sr_int(
 	{
 		rc = MPI_Isend(s_data[i], 1, MPI_INT, dest[i], mypid, comm,
 					   &(req[i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_int/MPI_Isend");
 	}
 	for (i = 0; i < num_r; i++)
 	{
 		rc = MPI_Irecv(r_data[i], 1, MPI_INT, src[i], src[i], comm,
 					   &(req[num_s + i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_int/MPI_Irecv");
 	}
 	if (num_s + num_r)
 	{
+		netgen_mpi_checkpoint(comm, "com_sr_int.waitall.begin", num_s, num_r);
 		rc = MPI_Waitall(num_s + num_r, req, stat);
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_int/MPI_Waitall");
+		netgen_mpi_checkpoint(comm, "com_sr_int.waitall.end", num_s, num_r);
 	}
 	free(req);
 	free(stat);
@@ -1224,30 +1206,20 @@ int com_sr_volumelement(
 	{
 		rc = MPI_Isend(s_data[i], s_length[i], datatype, dest[i], mypid, comm,
 					   &(req[i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_volumelement/MPI_Isend");
 	}
 	for (i = 0; i < num_r; i++)
 	{
 		rc = MPI_Irecv(r_data[i], r_length[i], datatype, src[i], src[i], comm,
-					   &(req[num_r + i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+					   &(req[num_s + i]));
+		netgen_mpi_check(comm, rc, "com_sr_volumelement/MPI_Irecv");
 	}
 	if (num_s + num_r)
 	{
+		netgen_mpi_checkpoint(comm, "com_sr_volumelement.waitall.begin", num_s, num_r);
 		rc = MPI_Waitall(num_s + num_r, req, stat);
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_volumelement/MPI_Waitall");
+		netgen_mpi_checkpoint(comm, "com_sr_volumelement.waitall.end", num_s, num_r);
 	}
 	free(req);
 	free(stat);
@@ -1631,196 +1603,198 @@ int *com_baryVolumeElements(
 	int mypid)
 {
 	nglib::Ng_Mesh *mesh = (nglib::Ng_Mesh *)submesh;
-	int locid;
-	std::list<int> pids;
 	std::list<int>::iterator li;
 	std::map<int, std::list<int>>::iterator ib;
-	std::map<int, VEVector *> pidmap;
-	std::map<int, VEVector *>::iterator ipm; // ������ ��id���ڵ������嵥Ԫ
-	int num_keys = nglib::Ng_GetNE(mesh);
-	std::set<int> pid_tmp;	// �嵥Ԫ��Ӧ�Ľ���
-	std::set<int> vols_tmp; // �ᵥԪ����,��ʱ�����Ѿ�������ĵ�Ԫ,�����ظ�����
+	std::map<int, VEVector> pidmap;
+	const int num_keys = nglib::Ng_GetNE(mesh);
+	std::set<int> pid_tmp;
 	std::set<int>::iterator pt;
-	int i;
 	int domainidx;
 	double xyz[3];
 	xdVElement ve;
-	// construct MPI Datatype MPI���� ��������
-	int count = 4;
-	int blocklens[4];
+
+	int blocklens[4] = {4, 12, 1, 1};
 	MPI_Aint addrs[4];
-	MPI_Datatype mpitypes[4];
+	MPI_Datatype mpitypes[4] = {MPI_INT, MPI_DOUBLE, MPI_INT, MPI_INT};
 	MPI_Datatype mpivetype;
-	blocklens[0] = 4;
-	blocklens[1] = 12;
-	blocklens[2] = 1;
-	blocklens[3] = 1;
-	mpitypes[0] = MPI_INT;
-	mpitypes[1] = MPI_DOUBLE;
-	mpitypes[2] = MPI_INT;
-	mpitypes[3] = MPI_INT;
-	//MPI_Address(&ve.Pindex, addrs);
-	//MPI_Address(&ve.Vertexs, addrs + 1);
-	//MPI_Address(&ve.gid, addrs + 2);
-	//MPI_Address(&ve.domidx, addrs + 3);
+	MPI_Get_address(&ve.Pindex, addrs);
+	MPI_Get_address(&ve.Vertexs, addrs + 1);
+	MPI_Get_address(&ve.gid, addrs + 2);
+	MPI_Get_address(&ve.domidx, addrs + 3);
+	addrs[3] -= addrs[0];
+	addrs[2] -= addrs[0];
+	addrs[1] -= addrs[0];
+	addrs[0] = 0;
+	netgen_mpi_check(
+		comm,
+		MPI_Type_create_struct(4, blocklens, addrs, mpitypes, &mpivetype),
+		"com_baryVolumeElements/MPI_Type_create_struct");
+	netgen_mpi_check(
+		comm, MPI_Type_commit(&mpivetype),
+		"com_baryVolumeElements/MPI_Type_commit");
 
-    MPI_Get_address(&ve.Pindex, addrs);
-    MPI_Get_address(&ve.Vertexs, addrs + 1);
-    MPI_Get_address(&ve.gid, addrs + 2);
-    MPI_Get_address(&ve.domidx, addrs + 3);
-	addrs[3] = addrs[3] - addrs[0];
-	addrs[2] = addrs[2] - addrs[0];
-	addrs[1] = addrs[1] - addrs[0];
-	addrs[0] = (MPI_Aint)0;
-	//MPI_Type_struct(count, blocklens, addrs, mpitypes, &mpivetype);
-	MPI_Type_create_struct(count, blocklens, addrs, mpitypes, &mpivetype);
-	MPI_Type_commit(&mpivetype);
 	int entity[4];
-	int *vols;
-	int volsize;
-
 	{
 		scaling::StageScope profile_stage("volume_exchange_pack", "compute");
-		for (i = 0; i < num_keys; i++)
+		for (int i = 0; i < num_keys; ++i)
 		{
 			nglib::Ng_GetVolumeElement(mesh, i + 1, entity, domainidx);
 			pid_tmp.clear();
 			std::map<int, int> num_adjPoints;
-			std::map<int, int>::iterator igap;
-			num_adjPoints.clear();
 
-			for (int k = 0; k < 4; k++)
+			for (int k = 0; k < 4; ++k)
 			{
 				ib = adjbarycs.find(entity[k]);
-				if (ib != adjbarycs.end())
-				{
-					for (li = (ib->second).begin(); li != (ib->second).end(); ++li)
-					{
-						num_adjPoints[*li]++;
-					}
-				}
+				if (ib == adjbarycs.end())
+					continue;
+				for (li = ib->second.begin(); li != ib->second.end(); ++li)
+					num_adjPoints[*li]++;
 			}
 
-			for (igap = num_adjPoints.begin(); igap != num_adjPoints.end(); ++igap)
+			for (const auto &entry : num_adjPoints)
 			{
-				if (igap->second >= 3)
-				{
-					pid_tmp.insert(igap->first);
-				}
+				if (entry.second >= 3)
+					pid_tmp.insert(entry.first);
 			}
-			if (pid_tmp.size())
-			{
+			if (pid_tmp.empty())
+				continue;
 
-				for (int k = 0; k < 4; k++)
-				{
-					nglib::Ng_GetPoint(mesh, entity[k], xyz);
-					ve.Vertexs[k].xyz[0] = xyz[0];
-					ve.Vertexs[k].xyz[1] = xyz[1];
-					ve.Vertexs[k].xyz[2] = xyz[2];
-					ve.Pindex[k] = oldgid[entity[k]];
-				}
-				ve.domidx = domainidx;
-				ve.gid = VEgid[i + 1];
-				for (pt = pid_tmp.begin(); pt != pid_tmp.end(); ++pt)
-				{
-					ipm = pidmap.find((*pt));
-					if (ipm == pidmap.end())
-					{
-						pidmap[(*pt)] = new VEVector();
-					}
-					pidmap[(*pt)]->push_back(ve);
-				}
+			for (int k = 0; k < 4; ++k)
+			{
+				nglib::Ng_GetPoint(mesh, entity[k], xyz);
+				ve.Vertexs[k].xyz[0] = xyz[0];
+				ve.Vertexs[k].xyz[1] = xyz[1];
+				ve.Vertexs[k].xyz[2] = xyz[2];
+				ve.Pindex[k] = oldgid[entity[k]];
 			}
+			ve.domidx = domainidx;
+			ve.gid = VEgid[i + 1];
+			for (pt = pid_tmp.begin(); pt != pid_tmp.end(); ++pt)
+				pidmap[*pt].push_back(ve);
 		}
 	}
 
-	int num_s, num_r; // number of sends and receives ���ͺͽ��յ�����
-	int *dest, *src;
-	int **s_data, **r_data, *size;
-	std::uint64_t volume_send_items = 0;
+	int comm_size = 0;
+	netgen_mpi_check(
+		comm, MPI_Comm_size(comm, &comm_size),
+		"com_baryVolumeElements/MPI_Comm_size");
+	if (comm_size != numprocs)
 	{
-		scaling::StageScope profile_stage("volume_exchange_pack", "compute");
-		num_s = num_r = pidmap.size();
-		if (num_s > 0)
-		{
-			MYCALLOC(dest, int *, num_s, sizeof(int));
-			MYCALLOC(s_data, int **, num_s, sizeof(int *));
-			MYCALLOC(src, int *, num_s, sizeof(int));
-			MYCALLOC(r_data, int **, num_s, sizeof(int *));
-			MYCALLOC(size, int *, num_s, sizeof(int));
-		}
-		else
-		{
-			dest = nullptr;
-			s_data = nullptr;
-			src = nullptr;
-			r_data = nullptr;
-			size = nullptr;
-		}
-		for (i = 0; i < num_r; i++)
-		{
-			MYCALLOC(r_data[i], int *, 1, sizeof(int));
-		}
-		i = 0;
-		for (ipm = pidmap.begin(); ipm != pidmap.end(); ++ipm)
-		{
-			dest[i] = ipm->first;
-			src[i] = ipm->first;
-			size[i] = ipm->second->size();
-			volume_send_items += static_cast<std::uint64_t>(size[i]);
-			s_data[i] = &size[i];
-			i++;
-		}
+		std::fprintf(
+			stderr,
+			"[MPI_ERROR] rank=%d communicator_size=%d numprocs=%d\n",
+			mypid, comm_size, numprocs);
+		std::fflush(stderr);
+		MPI_Abort(comm, MPI_ERR_OTHER);
+		std::abort();
 	}
+
+	std::vector<int> send_counts(comm_size, 0);
+	std::vector<int> recv_counts(comm_size, 0);
+	std::uint64_t volume_send_items = 0;
+	for (const auto &entry : pidmap)
+	{
+		const int peer = entry.first;
+		const std::size_t element_count = entry.second.size();
+		if (peer < 0 || peer >= comm_size || peer == mypid ||
+			element_count > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+		{
+			std::fprintf(
+				stderr,
+				"[MPI_ERROR] rank=%d invalid_peer=%d element_count=%zu\n",
+				mypid, peer, element_count);
+			std::fflush(stderr);
+			MPI_Abort(comm, MPI_ERR_RANK);
+			std::abort();
+		}
+		send_counts[peer] = static_cast<int>(element_count);
+		volume_send_items += static_cast<std::uint64_t>(element_count);
+	}
+
+	netgen_mpi_checkpoint(
+		comm, "com_baryVolumeElements.alltoall.begin",
+		static_cast<long>(pidmap.size()), comm_size);
+	ProfileCollectiveArrivalWait("volume_size_exchange_pre_collective_wait", comm);
 	{
 		scaling::StageScope profile_stage("volume_size_exchange", "communication");
-		com_sr_int(comm, num_s, num_r, dest, src, s_data, r_data, mypid);
+		netgen_mpi_check(
+			comm,
+			MPI_Alltoall(send_counts.data(), 1, MPI_INT,
+					 recv_counts.data(), 1, MPI_INT, comm),
+			"com_baryVolumeElements/MPI_Alltoall");
 	}
 	scaling::Profiler::instance().add_communication(
-		"volume_size_exchange", num_s, num_r,
-		static_cast<std::uint64_t>(num_s) * sizeof(int),
-		static_cast<std::uint64_t>(num_r) * sizeof(int));
-	xdVElement **r_data_ves, **s_data_ves;
-	int *r_length, *s_length;
+		"volume_size_exchange",
+		static_cast<std::uint64_t>(comm_size),
+		static_cast<std::uint64_t>(comm_size),
+		static_cast<std::uint64_t>(comm_size) * sizeof(int),
+		static_cast<std::uint64_t>(comm_size) * sizeof(int));
+
+	std::vector<int> dest;
+	std::vector<int> src;
+	std::vector<int> s_length;
+	std::vector<int> r_length;
+	std::vector<xdVElement *> s_data_ves;
+	std::vector<xdVElement *> r_data_ves;
+	std::vector<std::vector<xdVElement>> recv_by_peer(comm_size);
 	std::uint64_t volume_receive_items = 0;
 	{
 		scaling::StageScope profile_stage("volume_payload_prepare", "compute");
-		if (num_s > 0)
+		dest.reserve(pidmap.size());
+		s_length.reserve(pidmap.size());
+		s_data_ves.reserve(pidmap.size());
+
+		for (int peer = 0; peer < comm_size; ++peer)
 		{
-			MYCALLOC(s_length, int *, num_s, sizeof(int));
-			MYCALLOC(s_data_ves, xdVElement **, num_s, sizeof(xdVElement *));
-			MYCALLOC(r_length, int *, num_r, sizeof(int));
-			MYCALLOC(r_data_ves, xdVElement **, num_r, sizeof(xdVElement *));
-		}
-		else
-		{
-			r_length = nullptr;
-			r_data_ves = nullptr;
-			s_length = nullptr;
-			s_data_ves = nullptr;
-		}
-		i = 0;
-		for (ipm = pidmap.begin(); ipm != pidmap.end(); ++ipm)
-		{
-			s_length[i] = *s_data[i];
-			r_length[i] = *r_data[i];
-			volume_receive_items += static_cast<std::uint64_t>(r_length[i]);
-			s_data_ves[i] = &((*ipm->second)[0]);
-			i++;
-		}
-		for (i = 0; i < num_r; i++)
-		{
-			MYCALLOC(r_data_ves[i], xdVElement *, r_length[i], sizeof(xdVElement));
+			if (send_counts[peer] > 0)
+			{
+				auto send_it = pidmap.find(peer);
+				if (send_it == pidmap.end() ||
+					static_cast<int>(send_it->second.size()) != send_counts[peer])
+				{
+					std::fprintf(
+						stderr,
+						"[MPI_ERROR] rank=%d inconsistent send buffer for peer=%d\n",
+						mypid, peer);
+					std::fflush(stderr);
+					MPI_Abort(comm, MPI_ERR_COUNT);
+					std::abort();
+				}
+				dest.push_back(peer);
+				s_length.push_back(send_counts[peer]);
+				s_data_ves.push_back(send_it->second.data());
+			}
+
+			if (recv_counts[peer] > 0)
+			{
+				src.push_back(peer);
+				r_length.push_back(recv_counts[peer]);
+				recv_by_peer[peer].resize(static_cast<std::size_t>(recv_counts[peer]));
+				r_data_ves.push_back(recv_by_peer[peer].data());
+				volume_receive_items += static_cast<std::uint64_t>(recv_counts[peer]);
+			}
 		}
 	}
-	// send/recv all the messages
+
+	const int num_s = static_cast<int>(dest.size());
+	const int num_r = static_cast<int>(src.size());
+	netgen_mpi_checkpoint(
+		comm, "com_baryVolumeElements.alltoall.end", num_s, num_r);
+	netgen_mpi_checkpoint(
+		comm, "com_baryVolumeElements.payload.begin", num_s, num_r);
 	int volume_element_type_bytes = 0;
-	MPI_Type_size(mpivetype, &volume_element_type_bytes);
+	netgen_mpi_check(
+		comm, MPI_Type_size(mpivetype, &volume_element_type_bytes),
+		"com_baryVolumeElements/MPI_Type_size");
 	{
 		scaling::StageScope profile_stage("volume_payload_exchange", "communication");
-		com_sr_volumelement(comm, num_s, num_r, dest, src, s_length, r_length,
-							s_data_ves, r_data_ves, mpivetype, mypid);
+		com_sr_volumelement(
+			comm, num_s, num_r,
+			dest.data(), src.data(), s_length.data(), r_length.data(),
+			s_data_ves.data(), r_data_ves.data(), mpivetype, mypid);
 	}
+	netgen_mpi_checkpoint(
+		comm, "com_baryVolumeElements.payload.end", num_s, num_r);
 	scaling::Profiler::instance().add_communication(
 		"volume_payload_exchange", num_s, num_r,
 		volume_send_items * static_cast<std::uint64_t>(volume_element_type_bytes),
@@ -1829,94 +1803,73 @@ int *com_baryVolumeElements(
 		"volume_send_items", static_cast<double>(volume_send_items));
 	scaling::Profiler::instance().set_metric(
 		"volume_receive_items", static_cast<double>(volume_receive_items));
+
 	int *newgid = nullptr;
 	{
 		scaling::StageScope profile_stage("volume_exchange_unpack", "compute");
-		int oldpointnum;
-		oldpointnum = nglib::Ng_GetNP(mesh);
-	std::map<int, int> gid2lid;
-	std::map<int, int>::iterator ig2l;
-	std::map<int, int> gids_add;
-	std::map<int, int>::iterator iga;
-	std::map<int, int> gidVEs_add;
-	std::map<int, int>::iterator igaVE;
-	int index = -1;
-	int pi[4];
-	for (i = 0; i < nglib::Ng_GetNP(mesh); i++)
-	{
-		gid2lid[oldgid[i]] = i;
-	}
-	int numVEcount, numVEold;
-	numVEcount = nglib::Ng_GetNE(mesh);
-	numVEold = nglib::Ng_GetNE(mesh);
-	for (i = 0; i < num_r; i++)
-	{
-		// std::cout << mypid << "-" << i << "-" << r_length[i] << std::endl;
-		for (int j = 0; j < r_length[i]; j++)
+		const int oldpointnum = nglib::Ng_GetNP(mesh);
+		std::map<int, int> gid2lid;
+		std::map<int, int> gids_add;
+		std::map<int, int> gidVEs_add;
+		int index = -1;
+		int pi[4];
+
+		for (int i = 1; i <= nglib::Ng_GetNP(mesh); ++i)
+			gid2lid[oldgid[i]] = i;
+
+		int numVEcount = nglib::Ng_GetNE(mesh);
+		const int numVEold = nglib::Ng_GetNE(mesh);
+		for (int i = 0; i < num_r; ++i)
 		{
-			ve = r_data_ves[i][j];
-
-			for (int k = 0; k < 4; k++)
+			for (int j = 0; j < r_length[i]; ++j)
 			{
-				ig2l = gid2lid.find(ve.Pindex[k]);
-				if (ig2l == gid2lid.end())
+				ve = r_data_ves[i][j];
+				for (int k = 0; k < 4; ++k)
 				{
-					nglib::Ng_AddPoint(mesh, ve.Vertexs[k].xyz, index);
-					gids_add[index] = ve.Pindex[k];
-					gid2lid[ve.Pindex[k]] = index;
-					pi[k] = index;
+					auto point_it = gid2lid.find(ve.Pindex[k]);
+					if (point_it == gid2lid.end())
+					{
+						nglib::Ng_AddPoint(mesh, ve.Vertexs[k].xyz, index);
+						gids_add[index] = ve.Pindex[k];
+						gid2lid[ve.Pindex[k]] = index;
+						pi[k] = index;
+					}
+					else
+					{
+						pi[k] = point_it->second;
+					}
 				}
-				else
-				{
-					pi[k] = ig2l->second;
-				}
+				nglib::Ng_AddVolumeElement(mesh, nglib::NG_TET, pi, ve.domidx);
+				++numVEcount;
+				gidVEs_add[numVEcount] = ve.gid;
 			}
-			nglib::Ng_AddVolumeElement(mesh, nglib::NG_TET, pi, ve.domidx);
-			numVEcount++;
-			gidVEs_add[numVEcount] = ve.gid;
 		}
-	}
 
-	MYCALLOC(newgid, int *, nglib::Ng_GetNP(mesh) + 1, sizeof(int));
-	for (i = 1; i < oldpointnum + 1; i++)
-		newgid[i] = oldgid[i];
-	for (iga = gids_add.begin(); iga != gids_add.end(); ++iga)
-		newgid[iga->first] = iga->second;
-	VEindex vei;
-	for (i = 1; i < numVEold + 1; i++)
-	{
-		vei.gid = VEgid[i];
+		MYCALLOC(newgid, int *, nglib::Ng_GetNP(mesh) + 1, sizeof(int));
+		for (int i = 1; i <= oldpointnum; ++i)
+			newgid[i] = oldgid[i];
+		for (const auto &entry : gids_add)
+			newgid[entry.first] = entry.second;
 
-		vei.Isin = 0;
-		VEindexs.push_back(vei);
-	}
-	for (igaVE = gidVEs_add.begin(); igaVE != gidVEs_add.end(); ++igaVE)
-	{
-		vei.gid = igaVE->second;
-		vei.Isin = 1;
-		VEindexs.push_back(vei);
-	}
-	for (i = 0; i < num_r; i++)
-	{
-		free(r_data[i]);
-		free(r_data_ves[i]);
-	}
-	if (num_s > 0)
-	{
-		free(dest);
-		free(src);
-		free(size);
-		free(r_length);
-		free(r_data_ves);
-		free(s_length);
-		free(s_data_ves);
-
-		free(s_data);
-		free(r_data);
-	}
+		VEindex vei;
+		for (int i = 1; i <= numVEold; ++i)
+		{
+			vei.gid = VEgid[i];
+			vei.Isin = 0;
+			VEindexs.push_back(vei);
+		}
+		for (const auto &entry : gidVEs_add)
+		{
+			vei.gid = entry.second;
+			vei.Isin = 1;
+			VEindexs.push_back(vei);
+		}
 		free(oldgid);
 	}
-	MPI_Type_free(&mpivetype);
+
+	netgen_mpi_check(
+		comm, MPI_Type_free(&mpivetype),
+		"com_baryVolumeElements/MPI_Type_free");
 	return newgid;
 }
 
@@ -1993,35 +1946,43 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		TRIS_max = (std::max)(TRIS_max, TRIS);
 		}
 	}
-	int *Sum_Aspect_Ratio_count;
-	if(id == 0)
-		Sum_Aspect_Ratio_count = new int[6]{};
-	int reduce_dummy = 0;
-	for(int i = 0; i < 6; i++) {
-		ProfileCollectiveArrivalWait("quality_reduce_pre_collective_wait", MPI_COMM_WORLD);
-		{
-			scaling::StageScope profile_stage("quality_reduce", "communication");
-			int *receive_value = id == 0 ? &Sum_Aspect_Ratio_count[i] : &reduce_dummy;
-			MPI_Reduce(&Aspect_Ratio_count[i], receive_value, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-		}
+	int Sum_Aspect_Ratio_count[6] = {0, 0, 0, 0, 0, 0};
+	netgen_mpi_checkpoint(
+		MPI_COMM_WORLD, "meshQuality.aspect_ratio.reduce.begin", 6, 0);
+	ProfileCollectiveArrivalWait(
+		"quality_reduce_pre_collective_wait", MPI_COMM_WORLD);
+	{
+		scaling::StageScope profile_stage("quality_reduce", "communication");
+		netgen_mpi_check(
+			MPI_COMM_WORLD,
+			MPI_Reduce(
+				Aspect_Ratio_count, Sum_Aspect_Ratio_count,
+				6, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD),
+			"meshQualityEvaluation/MPI_Reduce");
 	}
-	if(id == 0)
+	netgen_mpi_checkpoint(
+		MPI_COMM_WORLD, "meshQuality.aspect_ratio.reduce.end", 6, 0);
+	if (id == 0)
 	{
 		scaling::StageScope profile_stage("quality_summary_io", "io");
-		// printf("Sum_Aspect_Ratio_count : %d\n",Sum_Aspect_Ratio_count[0]);
 		std::string savename = OUTPUT_PATH + "meshQuality/meshQuality.txt";
 		FILE *fp = std::fopen(savename.c_str(), "w");
+		if (fp == nullptr)
+		{
+			std::fprintf(stderr, "[IO_ERROR] rank=0 cannot open %s\n", savename.c_str());
+			std::fflush(stderr);
+			MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+			std::abort();
+		}
 		int Sum_Count_Surface = 0;
-		for(int i = 0; i < 6; i++)
+		for (int i = 0; i < 6; ++i)
 			Sum_Count_Surface += Sum_Aspect_Ratio_count[i];
-		// for(int i = 0; i < 6; i++)
 		fprintf(fp, "Sum_Aspect_Ratio(1-1.5): %f \r\n", (float)Sum_Aspect_Ratio_count[0]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(1.5-2): %f \r\n", (float)Sum_Aspect_Ratio_count[1]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(2-3): %f \r\n", (float)Sum_Aspect_Ratio_count[2]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(3-4): %f \r\n", (float)Sum_Aspect_Ratio_count[3]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(4-5): %f \r\n", (float)Sum_Aspect_Ratio_count[4]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(5-6): %f \r\n", (float)Sum_Aspect_Ratio_count[5]/(float)Sum_Count_Surface);
-		delete []Sum_Aspect_Ratio_count;
 		std::fclose(fp);
 	}
 	int volidx;
@@ -2100,7 +2061,10 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		FILE *fp = std::fopen(savename.c_str(), "w");
 		if (fp == NULL)
 		{
-			std::cout << "File " << savename.c_str() << "canot open" << std::endl;
+			std::fprintf(stderr, "[IO_ERROR] rank=%d cannot open %s\n", id, savename.c_str());
+			std::fflush(stderr);
+			MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+			std::abort();
 		}
 		else
 		{
@@ -2141,6 +2105,8 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		}
 		if (fp != NULL) std::fclose(fp);
 	}
+	delete []surfpoints;
+	delete []volpoints;
 	return false;
 }
 

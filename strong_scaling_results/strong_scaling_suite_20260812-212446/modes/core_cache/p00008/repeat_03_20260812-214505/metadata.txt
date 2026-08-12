@@ -1,0 +1,33 @@
+experiment=core_cache
+processes=8
+repeat=3
+timestamp=20260812-214505
+core_only=true
+hardware_cache_requested=true
+hardware_cache_available_ranks=0
+hardware_cache_note=perf_event_open(cycles) failed: No such file or directory
+process_io_counter_available_ranks=8
+mpi_library=MPICH Version:	4.0.2
+MPICH Release date:	Thu Apr  7 12:34:45 CDT 2022
+MPICH ABI:	14:2:2
+MPICH Device:	ch4:ucx
+MPICH configure:	--prefix=/usr/local/mpi-x --with-device=ch4:ucx --with-ucx=/usr/local/ucx --enable-fast=all --enable-threads=runtime --enable-error-checking=runtime --enable-nolocal --enable-romio=yes --with-file-system=ufs+nfs --with-pmix=/usr --with-mpe CFLAGS=-fPIC FFLAGS=-fPIC CXXFLAGS=-fPIC FCFLAGS=-fPIC
+MPICH CC:	gcc -fPIC   -DNDEBUG -DNVALGRIND -O2
+MPICH CXX:	g++ -fPIC  -DNDEBUG -DNVALGRIND -O2
+MPICH F77:	gfortran -fPIC  -O2
+MPICH FC:	gfortran -fPIC  -O2
+
+compiler=12.2.0
+adjacency_enabled=true
+collective_timing=pre_barrier_arrival_wait_then_aligned_collective_execution
+command=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/build/mesh_occ_mpi/mesh_occ_mpi -i /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP -o /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_suite_20260812-212446/modes/core_cache/application_output/p00008/repeat_03/ -l 2 -r 2 --maxh 1000.0 --minh 0.0 -v -adj --profile --profile-dir /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_suite_20260812-212446/modes --profile-experiment core_cache --profile-repeat 3 --profile-core-only --profile-cache
+communication_fraction_definition=communication_execution_only; arrival_wait_reported_separately
+input_path=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+maxh=1000.000000
+minh=0.000000
+numlevels=2
+numrefine=2
+omp_num_threads=1
+output_path=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_suite_20260812-212446/modes/core_cache/application_output/p00008/repeat_03/
+profiler_schema_version=2
+save_vol=true

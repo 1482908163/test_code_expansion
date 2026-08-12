@@ -1,0 +1,48 @@
+Unified Strong-scaling Suite (统一强扩展实验报告)
+==========================================================================================================================================
+Suite directory (实验目录): /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_suite_20260812-212446
+Requested modes (请求模式): core_timing, core_cache, full_io
+Available modes (有效模式): core_timing, core_cache, full_io
+Core timing source (核心计时来源): core_timing
+P-job scheduling (不同 P 调度): concurrent
+Page-cache policy (页缓存策略): core=evict-first, full_io=evict-first
+主曲线使用 warm（repeat 2+ 中位数）；cold（repeat 1）单独列出，不再混入波动系数。
+
+Execution status (执行状态): 19/21 completed; details: suite_status.csv
+  [FAILED] P=128 mode=full_io compute_exit=139 analysis_exit=0 repeats=1/6
+  [FAILED] P=256 mode=full_io compute_exit=139 analysis_exit=0 repeats=2/6
+
+Cold candidates（未确认清缓存）: core P=none; full_io P=128,256。请结合物理读取量判断。
+
+Warm strong scaling (热缓存强扩展)
+      P     Core(s)    Speedup    Eff(%)    Wait(s)   Wait(%)    Comm(s)   Comm(%)    Miss(%)      IPC   FullIO(s)    I/O(%)   Extra(%)
+------------------------------------------------------------------------------------------------------------------------------------------
+      1    719.339     1.000   100.00     0.000     0.00     0.046     0.01     2.886   0.620   1795.265    45.85    149.57
+      8    118.825     6.054    75.67    21.532    18.11     0.921     0.78       N/A     N/A    275.574    45.44    131.92
+     16     81.813     8.793    54.95    18.549    22.67     0.406     0.50     2.483   0.596    159.499    38.23     94.96
+     32     57.920    12.420    38.81    12.019    20.75     0.365     0.63     2.326   0.609     95.305    31.97     64.55
+     64     45.692    15.743    24.60     7.411    16.25     0.280     0.61     2.278   0.605     67.351    27.62     47.40
+    128     40.199    17.894    13.98     5.536    13.77     0.188     0.47     2.230   0.603     51.384    20.64     27.82
+    256     36.549    19.681     7.69     3.682    10.07     0.156     0.43     2.177   0.602     42.503    15.15     16.29
+
+Wait 是集合通信前置 MPI_Barrier 的到达对齐时间；Comm 是对齐后的集合通信执行与点对点通信阶段，不是纯网络线速传输，仍包含 MPI 算法和协议开销；阻塞式点对点调用还可能包含对端就绪等待。
+
+Cold vs warm page cache (冷/热页缓存)
+      P    CoreCold    CoreWarm   CorePenalty%      IOCold      IOWarm   IOPenalty%     CorePhysR C/W(GiB)     IOPhysR C/W(GiB)
+-------------------------------------------------------------------------------------------------------------------------------
+      1    727.422    719.339          1.12   1740.474   1795.265       -3.05           0.012/0.000         0.013/0.179
+      8    119.334    118.825          0.43    277.501    275.574        0.70           0.013/0.000         0.011/0.021
+     16     82.434     81.813          0.76    157.362    159.499       -1.34           0.013/0.000         0.011/0.052
+     32     59.108     57.920          2.05     95.314     95.305        0.01           0.026/0.000         0.025/0.000
+     64     46.121     45.692          0.94     67.531     67.351        0.27           0.052/0.000         0.039/0.000
+    128     40.831     40.199          1.57        N/A     51.384         N/A           0.105/0.000                 N/A
+    256     37.748     36.549          3.28        N/A     42.503         N/A           0.208/0.000                 N/A
+
+Files (文件)
+  suite_summary.csv                   统一绘图数据
+  suite_status.csv                    每个 P、每种模式的完成/失败/缺失状态
+  mode_analysis_status.tsv            各模式汇总脚本状态
+  suite_report.txt                    本文件
+  ../modes/core_timing/analysis/            core_timing 的详细阶段报告
+  ../modes/core_cache/analysis/            core_cache 的详细阶段报告
+  ../modes/full_io/analysis/            full_io 的详细阶段报告
