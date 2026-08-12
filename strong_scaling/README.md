@@ -67,7 +67,7 @@ GCCHOME=/new/gcc-12 LOCAL_LIB=/new/local/lib \
 DRY_RUN=1 bash strong_scaling/submit_experiments.sh
 ```
 
-主入口仍是原来的 `strong_scaling/submit_experiments.sh`。默认规模和每节点进程数以脚本顶部配置为准，每个规模重复 6 次。提交脚本为每个“模式 + P”申请一个独立 Slurm 作业，并默认使用 `afterany` 依赖按模式、再按 P 串成一条作业序列；因此任意时刻最多只有一个本批实验作业访问共享文件系统。即使某个作业失败，后续作业仍会启动。同一模式、同一 P 的所有 cold/warm（冷/热缓存）重复保留在同一个 allocation（资源分配）中，保证使用相同节点；某次重复失败后会继续剩余重复，最后仍生成包含失败/缺失项的统一报告。
+主入口仍是原来的 `strong_scaling/submit_experiments.sh`。默认规模和每节点进程数以脚本顶部配置为准，每个规模重复 6 次。提交脚本为每个 P 申请一个独立 Slurm 作业，所有 P 之间没有依赖，可以并行运行；但用递增的 `--begin` 设置统一启动间隔，避免所有作业在同一时刻集中读取输入文件。某个 P 失败不会阻塞其他 P。同一 P 的所有模式和 cold/warm（冷/热缓存）重复保留在同一个 allocation（资源分配）中，保证使用相同节点；某次重复失败后会继续剩余重复，最后仍生成包含失败/缺失项的统一报告。
 
 ### 3.2 推荐：一次提交完整实验套件
 
@@ -76,13 +76,13 @@ SUITE_MODES="core_timing core_cache full_io" \
   bash strong_scaling/submit_experiments.sh
 ```
 
-这一个命令会提交三组相互独立、但依赖串行的作业：
+这一个命令会为每个 P 提交一个独立作业；每个 P 作业内部依次运行：
 
 1. `core_timing`：核心路径计时、通信和并行效率，不启用硬件计数器；
 2. `core_cache`：相同核心路径并启用 CPU（中央处理器）硬件缓存计数；
 3. `full_io`：完整结果写出和 I/O（输入/输出）计时。
 
-默认顺序是 `core_timing: P1 → P2 → ...`，然后 `core_cache: P1 → P2 → ...`，最后 `full_io: P1 → P2 → ...`。三种模式不会塞进同一个 P 作业，避免单个低 P 作业长时间占用节点，也避免硬件计数器或结果写出污染主计时。一次提交执行哪些模式可自由选择，也接受逗号分隔，例如：
+不同 P 作业可以互相重叠运行，但最早启动时间依次错开。默认间隔为 120 秒，例如 P 序列中的第 1、2、3 个作业分别在提交后 0、120、240 秒具备启动资格。三种模式仍分开执行，避免硬件计数器或结果写出污染主计时。一次提交执行哪些模式可自由选择，也接受逗号分隔，例如：
 
 ```bash
 SUITE_MODES="core_timing,full_io" \
@@ -108,7 +108,8 @@ SUITE_MODES="core_timing,full_io" \
 | `SUITE_MODE` | `1` | `1` 执行自定义模式套件；设为 `0` 可兼容原来的单模式调用 |
 | `CORE_ONLY` | 套件按模式设置 | 单模式时，`1` 跳过普通结果写出，`0` 测完整 I/O |
 | `CACHE_COUNTERS` | 套件按模式设置 | 单模式时是否采集硬件缓存计数 |
-| `SERIALIZE_JOBS` | `1` | `1` 使所有“模式 + P”作业按 `afterany` 依赖串行，前项失败仍继续，避免本批实验相互争用共享文件系统 |
+| `START_INTERVAL_SECONDS` | `120` | 相邻 P 作业的最早启动时间间隔；`0` 表示同时具备启动资格 |
+| `SERIALIZE_JOBS` | `0` | 默认 `0`，P 作业独立并可并行；设为 `1` 才启用旧的 `afterany` 串行方式 |
 | `SUITE_MODES` | `core_timing core_cache full_io` | 一次提交包含的模式，可用空格或逗号分隔 |
 | `PAGE_CACHE_POLICY` | `evict-first` | 每种模式的第 1 次运行前请求清理文件页缓存；`observe` 只观察首次运行 |
 | `PAGE_CACHE_STRICT` | `0` | 清缓存提示失败时是否立即终止；默认继续并把该次标为候选冷启动 |
@@ -122,6 +123,14 @@ SUITE_MODES="core_timing,full_io" \
 
 ```bash
 RANKS_PER_NODE=4 SBATCH_EXTRA_ARGS="--time=02:00:00" \
+  bash strong_scaling/submit_experiments.sh
+```
+
+例如将相邻作业启动间隔改为 3 分钟：
+
+```bash
+START_INTERVAL_SECONDS=180 \
+SUITE_MODES="core_timing core_cache full_io" \
   bash strong_scaling/submit_experiments.sh
 ```
 
@@ -201,5 +210,5 @@ E(P)=\frac{S(P)}{P/P_0}\times100\%.
 - 通信字节数是应用层缓冲区规模，不等同于网络链路上的实际流量；集合通信接收量包含本进程贡献。
 - `/proc/self/io` 用于区分逻辑和物理 I/O。逻辑读写量大、物理读写量小，通常表示页缓存或延迟写回生效。
 - 主强扩展曲线只使用 warm（第 2 次及以后）的中位数；cold（第 1 次）单列，二者不再混合计算中位数或变异系数。
-- 所有“模式 + P”作业默认串行，可消除本批作业之间的并发竞争，但不能隔离集群上其他用户的共享文件系统负载；应同时保留作业时间、节点和调度日志。
+- 不同 P 默认并行、错峰启动，可以减少同一时刻集中读取输入文件，但不能消除后续运行阶段之间或其他用户产生的共享文件系统竞争；应同时保留作业时间、节点和调度日志。
 - `all_runs.csv` 和 `CV(%)`（变异系数）用于判断重复实验抖动；抖动大时不要只看中位数，应检查 `scheduler_logs/`、节点列表和逐 rank 数据。

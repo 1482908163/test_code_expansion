@@ -4,10 +4,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# One Slurm allocation is submitted per mode and process count.  Jobs are
-# serialized by default so only one benchmark reads/writes the shared file
-# system at a time.  Repeats of the same mode stay in one allocation so their
-# cold/warm page-cache comparison uses the same nodes.
+# One Slurm allocation is submitted per process count.  Allocations are
+# independent and may overlap, but their earliest start times are staggered so
+# they do not all begin reading the shared input at once.  All requested modes
+# and repeats for the same process count stay in one allocation.
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPOSITORY_ROOT}/strong_scaling_results}"
 EXPERIMENT="${EXPERIMENT:-strong_scaling_suite}"
 BATCH_ID="${BATCH_ID:-$(date +%Y%m%d-%H%M%S)}"
@@ -21,7 +21,8 @@ SBATCH_COMMAND="${SBATCH_COMMAND:-yhbatch}"
 SBATCH_JOB_PREFIX="${SBATCH_JOB_PREFIX:-mesh_scale}"
 SBATCH_EXTRA_ARGS="${SBATCH_EXTRA_ARGS:-}"
 DRY_RUN="${DRY_RUN:-0}"
-SERIALIZE_JOBS="${SERIALIZE_JOBS:-1}"
+SERIALIZE_JOBS="${SERIALIZE_JOBS:-0}"
+START_INTERVAL_SECONDS="${START_INTERVAL_SECONDS:-120}"
 SUITE_MODE="${SUITE_MODE:-1}"
 SUITE_MODES="${SUITE_MODES:-core_timing core_cache full_io}"
 SUITE_MODES="${SUITE_MODES//,/ }"
@@ -46,6 +47,10 @@ if [[ ! "${REPEATS}" =~ ^[1-9][0-9]*$ || ! "${RANKS_PER_NODE}" =~ ^[1-9][0-9]*$ 
 fi
 if [[ ! "${SERIALIZE_JOBS}" =~ ^[01]$ || ! "${SUITE_MODE}" =~ ^[01]$ || ! "${PAGE_CACHE_STRICT}" =~ ^[01]$ ]]; then
     echo "[ERROR] SERIALIZE_JOBS、SUITE_MODE 和 PAGE_CACHE_STRICT 只能是 0 或 1。" >&2
+    exit 2
+fi
+if [[ ! "${START_INTERVAL_SECONDS}" =~ ^[0-9]+$ ]]; then
+    echo "[ERROR] START_INTERVAL_SECONDS 必须是大于或等于 0 的整数。" >&2
     exit 2
 fi
 if [[ ! "${PAGE_CACHE_POLICY}" =~ ^(observe|evict-first)$ ]]; then
@@ -77,9 +82,6 @@ if [[ "${SUITE_MODE}" == "1" ]]; then
         fi
         seen_modes+="${mode} "
     done
-    submission_modes=("${suite_modes_array[@]}")
-else
-    submission_modes=(single)
 fi
 if [[ "${DRY_RUN}" != "1" ]] && ! command -v "${SBATCH_COMMAND}" >/dev/null 2>&1; then
     echo "[ERROR] 找不到 ${SBATCH_COMMAND}；请在 Slurm 登录节点运行。" >&2
@@ -107,7 +109,7 @@ export EXTRA_APP_ARGS="${EXTRA_APP_ARGS:-}"
 export CPU_BIND="${CPU_BIND:-cores}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export LOAD_CLUSTER_ENV="${LOAD_CLUSTER_ENV:-1}"
-export SERIALIZE_JOBS SUITE_MODE SUITE_MODES PAGE_CACHE_POLICY PAGE_CACHE_STRICT
+export SERIALIZE_JOBS START_INTERVAL_SECONDS SUITE_MODE SUITE_MODES PAGE_CACHE_POLICY PAGE_CACHE_STRICT
 
 {
     echo "Strong Scaling Submission Plan (强扩展提交计划)"
@@ -138,10 +140,11 @@ export SERIALIZE_JOBS SUITE_MODE SUITE_MODES PAGE_CACHE_POLICY PAGE_CACHE_STRICT
     fi
     echo "suite_mode=${SUITE_MODE}"
     echo "suite_modes=${SUITE_MODES}"
-    echo "submission_order=mode-major"
-    echo "submission_unit=mode-and-process-count"
     echo "serialize_jobs=${SERIALIZE_JOBS}"
-    echo "dependency_policy=afterany"
+    echo "submission_unit=process-count"
+    echo "start_interval_seconds=${START_INTERVAL_SECONDS}"
+    echo "start_policy=independent-staggered"
+    echo "analysis_dependency_policy=afterany-all"
     echo "page_cache_policy=${PAGE_CACHE_POLICY}"
     echo "page_cache_strict=${PAGE_CACHE_STRICT}"
     echo "launcher=${LAUNCHER}"
@@ -149,107 +152,89 @@ export SERIALIZE_JOBS SUITE_MODE SUITE_MODES PAGE_CACHE_POLICY PAGE_CACHE_STRICT
     echo "cpu_bind=${CPU_BIND}"
     echo "sbatch_extra_args=${SBATCH_EXTRA_ARGS}"
     echo
-    if [[ "${SUITE_MODE}" == "1" ]]; then
-        echo "mode processes nodes"
-        for mode in "${submission_modes[@]}"; do
-            for processes in ${PROCESS_COUNTS}; do
-                nodes=$(( (processes + RANKS_PER_NODE - 1) / RANKS_PER_NODE ))
-                printf '%-12s %9d %5d\n' "${mode}" "${processes}" "${nodes}"
-            done
-        done
-    else
-        echo "processes nodes"
-        for processes in ${PROCESS_COUNTS}; do
-            nodes=$(( (processes + RANKS_PER_NODE - 1) / RANKS_PER_NODE ))
-            printf '%9d %5d\n' "${processes}" "${nodes}"
-        done
-    fi
+    echo "processes nodes start_delay_s"
+    job_index=0
+    for processes in ${PROCESS_COUNTS}; do
+        nodes=$(( (processes + RANKS_PER_NODE - 1) / RANKS_PER_NODE ))
+        start_delay=$(( job_index * START_INTERVAL_SECONDS ))
+        printf '%9d %5d %13d\n' "${processes}" "${nodes}" "${start_delay}"
+        job_index=$(( job_index + 1 ))
+    done
 } > "${RUN_ROOT}/run_plan.txt"
 
 job_ids=()
 previous_job_id=""
-previous_job_label=""
+previous_process=""
+job_index=0
 {
     echo
-    echo "submission_sequence (串行提交顺序)"
-    if [[ "${SUITE_MODE}" == "1" ]]; then
-        echo "mode processes nodes job_id"
-    else
-        echo "processes nodes job_id"
-    fi
+    echo "submission_sequence (错峰提交顺序)"
+    echo "processes nodes start_delay_s job_id"
 } >> "${RUN_ROOT}/run_plan.txt"
 
-for submission_mode in "${submission_modes[@]}"; do
-    for processes in ${PROCESS_COUNTS}; do
-        if (( processes <= 0 )); then
-            echo "[ERROR] 非法进程数: ${processes}" >&2
-            exit 2
-        fi
-        nodes=$(( (processes + RANKS_PER_NODE - 1) / RANKS_PER_NODE ))
-        process_tag=$(printf 'p%05d' "${processes}")
-        compute_script="${SCRIPT_DIR}/run_experiments.sh"
-        export_spec="ALL,STRONG_SCALING_DIR=${SCRIPT_DIR},PROCESS_COUNTS=${processes},ANALYZE_AFTER_RUN=0,ANALYSIS_ONLY=0,DRY_RUN=0"
-        log_tag="${process_tag}"
-        job_name="${SBATCH_JOB_PREFIX}_${processes}"
-        job_label="P=${processes}"
-        if [[ "${SUITE_MODE}" == "1" ]]; then
-            compute_script="${SCRIPT_DIR}/run_suite_process.sh"
-            export_spec+=",SUITE_ROOT=${RUN_ROOT},SUITE_NAME=${RUN_NAME},SUITE_MODES=${submission_mode}"
-            log_tag="${submission_mode}_${process_tag}"
-            job_name="${SBATCH_JOB_PREFIX}_${submission_mode}_${processes}"
-            job_label="${submission_mode}:P=${processes}"
-        fi
+for processes in ${PROCESS_COUNTS}; do
+    if (( processes <= 0 )); then
+        echo "[ERROR] 非法进程数: ${processes}" >&2
+        exit 2
+    fi
+    nodes=$(( (processes + RANKS_PER_NODE - 1) / RANKS_PER_NODE ))
+    start_delay=$(( job_index * START_INTERVAL_SECONDS ))
+    process_tag=$(printf 'p%05d' "${processes}")
+    compute_script="${SCRIPT_DIR}/run_experiments.sh"
+    export_spec="ALL,STRONG_SCALING_DIR=${SCRIPT_DIR},PROCESS_COUNTS=${processes},ANALYZE_AFTER_RUN=0,ANALYSIS_ONLY=0,DRY_RUN=0"
+    if [[ "${SUITE_MODE}" == "1" ]]; then
+        compute_script="${SCRIPT_DIR}/run_suite_process.sh"
+        export_spec+=",SUITE_ROOT=${RUN_ROOT},SUITE_NAME=${RUN_NAME}"
+    fi
 
-        submit_command=(
-            "${SBATCH_COMMAND}"
-            --parsable
-            --job-name="${job_name}"
-            --partition="${PARTITION}"
-            --nodes="${nodes}"
-            --ntasks="${processes}"
-            --ntasks-per-node="${RANKS_PER_NODE}"
-            --cpus-per-task=1
-            --output="${RUN_ROOT}/scheduler_logs/${log_tag}_%j.out"
-            --error="${RUN_ROOT}/scheduler_logs/${log_tag}_%j.err"
-            --export="${export_spec}"
-        )
-        if [[ "${SERIALIZE_JOBS}" == "1" && -n "${previous_job_id}" ]]; then
-            submit_command+=( --dependency="afterany:${previous_job_id}" )
-        fi
-        submit_command+=( "${sbatch_extra[@]}" "${compute_script}" )
+    submit_command=(
+        "${SBATCH_COMMAND}"
+        --parsable
+        --job-name="${SBATCH_JOB_PREFIX}_${processes}"
+        --partition="${PARTITION}"
+        --nodes="${nodes}"
+        --ntasks="${processes}"
+        --ntasks-per-node="${RANKS_PER_NODE}"
+        --cpus-per-task=1
+        --output="${RUN_ROOT}/scheduler_logs/${process_tag}_%j.out"
+        --error="${RUN_ROOT}/scheduler_logs/${process_tag}_%j.err"
+        --export="${export_spec}"
+    )
+    if (( start_delay > 0 )); then
+        submit_command+=( --begin="now+${start_delay}" )
+    fi
+    if [[ "${SERIALIZE_JOBS}" == "1" && -n "${previous_job_id}" ]]; then
+        submit_command+=( --dependency="afterany:${previous_job_id}" )
+    fi
+    submit_command+=( "${sbatch_extra[@]}" "${compute_script}" )
 
-        printf '[SUBMIT] mode=%s processes=%s nodes=%s:' "${submission_mode}" "${processes}" "${nodes}"
-        printf ' %q' "${submit_command[@]}"
-        printf '\n'
-        if [[ "${DRY_RUN}" == "1" ]]; then
-            if [[ "${SERIALIZE_JOBS}" == "1" && -n "${previous_job_label}" ]]; then
-                echo "[ORDER] ${job_label} 将在 ${previous_job_label} 结束后启动。"
-            fi
-            if [[ "${SUITE_MODE}" == "1" ]]; then
-                printf '%-12s %9d %5d %s\n' "${submission_mode}" "${processes}" "${nodes}" "DRY_RUN" >> "${RUN_ROOT}/run_plan.txt"
-            else
-                printf '%9d %5d %s\n' "${processes}" "${nodes}" "DRY_RUN" >> "${RUN_ROOT}/run_plan.txt"
-            fi
-            previous_job_label="${job_label}"
-            continue
+    printf '[SUBMIT] processes=%s nodes=%s start_delay=%ss:' "${processes}" "${nodes}" "${start_delay}"
+    printf ' %q' "${submit_command[@]}"
+    printf '\n'
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        if [[ "${SERIALIZE_JOBS}" == "1" && -n "${previous_process}" ]]; then
+            echo "[ORDER] P=${processes} 将在 P=${previous_process} 结束后启动。"
+        elif (( start_delay > 0 )); then
+            echo "[STAGGER] P=${processes} 最早在提交后 ${start_delay} 秒具备启动资格。"
         fi
+        printf '%9d %5d %13d %s\n' "${processes}" "${nodes}" "${start_delay}" "DRY_RUN" >> "${RUN_ROOT}/run_plan.txt"
+        previous_process="${processes}"
+        job_index=$(( job_index + 1 ))
+        continue
+    fi
 
-        job_result=$("${submit_command[@]}")
-        job_id="${job_result%%;*}"
-        if [[ ! "${job_id}" =~ ^[0-9]+$ ]]; then
-            echo "[ERROR] 无法解析 sbatch 作业号: ${job_result}" >&2
-            exit 2
-        fi
-        job_ids+=("${job_id}")
-        previous_job_id="${job_id}"
-        previous_job_label="${job_label}"
-        if [[ "${SUITE_MODE}" == "1" ]]; then
-            printf '%-12s %9d %5d %s\n' "${submission_mode}" "${processes}" "${nodes}" "${job_id}" >> "${RUN_ROOT}/run_plan.txt"
-        else
-            printf '%9d %5d %s\n' "${processes}" "${nodes}" "${job_id}" >> "${RUN_ROOT}/run_plan.txt"
-        fi
-        echo "[QUEUED] ${job_label} -> job ${job_id}"
-    done
+    job_result=$("${submit_command[@]}")
+    job_id="${job_result%%;*}"
+    if [[ ! "${job_id}" =~ ^[0-9]+$ ]]; then
+        echo "[ERROR] 无法解析 sbatch 作业号: ${job_result}" >&2
+        exit 2
+    fi
+    job_ids+=("${job_id}")
+    previous_job_id="${job_id}"
+    previous_process="${processes}"
+    printf '%9d %5d %13d %s\n' "${processes}" "${nodes}" "${start_delay}" "${job_id}" >> "${RUN_ROOT}/run_plan.txt"
+    echo "[QUEUED] ${process_tag} -> job ${job_id}, start_delay=${start_delay}s"
+    job_index=$(( job_index + 1 ))
 done
 
 if [[ "${DRY_RUN}" == "1" ]]; then
