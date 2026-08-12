@@ -12,6 +12,11 @@ mkdir -p "${SUITE_ROOT}/mode_status"
 overall_status=0
 read -r -a suite_modes_array <<< "${SUITE_MODES}"
 
+if (( ${#suite_modes_array[@]} != 1 )); then
+    echo "[ERROR] 每个 Slurm 作业必须且只能运行一种模式；请通过 submit_experiments.sh 提交模式序列。" >&2
+    exit 2
+fi
+
 for mode in "${suite_modes_array[@]}"; do
     case "${mode}" in
         core_cache)
