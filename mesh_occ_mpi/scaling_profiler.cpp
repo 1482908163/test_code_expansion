@@ -12,9 +12,11 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <ctime>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -69,6 +71,7 @@ const std::vector<StageDefinition> &stage_definitions()
         {"vertex_exchange_unpack", "compute"},
         {"partition_result_io", "io"},
         {"volume_exchange_pack", "compute"},
+        {"volume_size_exchange_pre_collective_wait", "synchronization"},
         {"volume_size_exchange", "communication"},
         {"volume_payload_prepare", "compute"},
         {"volume_payload_exchange", "communication"},
@@ -103,14 +106,29 @@ const std::vector<std::string> &metric_definitions()
         "adjacent_processes",
         "vertex_send_items",
         "vertex_receive_items",
+        "vertex_num_s",
+        "vertex_num_r",
+        "vertex_waitall_seconds",
         "volume_send_items",
         "volume_receive_items",
+        "volume_num_s",
+        "volume_num_r",
+        "volume_waitall_seconds",
         "local_points_after_adjacency",
         "local_surface_elements_after_adjacency",
         "local_volume_elements_after_adjacency",
         "peak_rss_mib",
         "hardware_cache_available",
         "process_io_available",
+    };
+    return definitions;
+}
+
+const std::vector<std::string> &peer_exchange_definitions()
+{
+    static const std::vector<std::string> definitions = {
+        "vertex_exchange",
+        "volume_payload_exchange",
     };
     return definitions;
 }
@@ -225,6 +243,40 @@ ScalarStats summarize(const std::vector<double> &values)
     result.average = std::accumulate(values.begin(), values.end(), 0.0) /
                      static_cast<double>(values.size());
     return result;
+}
+
+double percentile(std::vector<double> values, double fraction)
+{
+    if (values.empty()) return 0.0;
+    std::sort(values.begin(), values.end());
+    if (values.size() == 1) return values.front();
+    const double position = fraction * static_cast<double>(values.size() - 1);
+    const std::size_t lower = static_cast<std::size_t>(std::floor(position));
+    const std::size_t upper = static_cast<std::size_t>(std::ceil(position));
+    const double weight = position - static_cast<double>(lower);
+    return values[lower] * (1.0 - weight) + values[upper] * weight;
+}
+
+std::string join_integers(const std::vector<int> &values)
+{
+    std::ostringstream output;
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0) output << ';';
+        output << values[index];
+    }
+    return output.str();
+}
+
+std::string join_peer_items(const std::vector<int> &peers,
+                            const std::vector<std::uint64_t> &items)
+{
+    std::ostringstream output;
+    const std::size_t count = std::min(peers.size(), items.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        if (index != 0) output << ';';
+        output << peers[index] << ':' << items[index];
+    }
+    return output.str();
 }
 
 double safe_ratio(double numerator, double denominator)
@@ -423,6 +475,7 @@ void Profiler::configure(MPI_Comm comm, const ProfileConfig &config)
 
     stages_.clear();
     stage_categories_.clear();
+    peer_exchanges_.clear();
     metrics_.clear();
     metadata_.clear();
     cache_error_.clear();
@@ -491,6 +544,47 @@ void Profiler::add_communication(const std::string &stage,
     stats.receive_messages += receive_messages;
     stats.send_bytes += send_bytes;
     stats.receive_bytes += receive_bytes;
+}
+
+void Profiler::record_peer_exchange(const std::string &stage,
+                                    int num_s,
+                                    const int *destinations,
+                                    const int *send_items,
+                                    int num_r,
+                                    const int *sources,
+                                    const int *receive_items,
+                                    std::uint64_t item_bytes)
+{
+    if (!enabled() || !config_.collect_communication_graph) return;
+    if (num_s < 0 || num_r < 0 ||
+        (num_s > 0 && (destinations == nullptr || send_items == nullptr)) ||
+        (num_r > 0 && (sources == nullptr || receive_items == nullptr))) {
+        throw std::invalid_argument("invalid peer exchange description for " + stage);
+    }
+
+    PeerExchangeLocal exchange;
+    exchange.item_bytes = item_bytes;
+    if (num_s > 0) {
+        exchange.destinations.assign(destinations, destinations + num_s);
+    }
+    if (num_r > 0) {
+        exchange.sources.assign(sources, sources + num_r);
+    }
+    exchange.send_items.reserve(static_cast<std::size_t>(num_s));
+    exchange.receive_items.reserve(static_cast<std::size_t>(num_r));
+    for (int index = 0; index < num_s; ++index) {
+        if (send_items[index] < 0) {
+            throw std::invalid_argument("negative send count for " + stage);
+        }
+        exchange.send_items.push_back(static_cast<std::uint64_t>(send_items[index]));
+    }
+    for (int index = 0; index < num_r; ++index) {
+        if (receive_items[index] < 0) {
+            throw std::invalid_argument("negative receive count for " + stage);
+        }
+        exchange.receive_items.push_back(static_cast<std::uint64_t>(receive_items[index]));
+    }
+    peer_exchanges_[stage] = std::move(exchange);
 }
 
 void Profiler::set_total_elapsed(double seconds)
@@ -686,6 +780,62 @@ void Profiler::finalize()
                rank_ == 0 ? all_processors.data() : nullptr,
                MPI_MAX_PROCESSOR_NAME, MPI_CHAR, 0, comm_);
 
+    // Detailed peer lists are gathered only after total_wall_seconds has been
+    // fixed by the application.  This keeps the optional diagnostic traffic
+    // and rank-0 CSV output outside all reported application timings.
+    constexpr int peer_record_width = 5;
+    std::vector<long long> local_peer_records;
+    std::vector<int> peer_value_counts;
+    std::vector<int> peer_value_displacements;
+    std::vector<long long> all_peer_records;
+    if (config_.collect_communication_graph) {
+        const auto &peer_definitions = peer_exchange_definitions();
+        for (std::size_t stage = 0; stage < peer_definitions.size(); ++stage) {
+            const auto found = peer_exchanges_.find(peer_definitions[stage]);
+            if (found == peer_exchanges_.end()) continue;
+            const PeerExchangeLocal &exchange = found->second;
+            for (std::size_t index = 0; index < exchange.destinations.size(); ++index) {
+                const std::uint64_t items = exchange.send_items[index];
+                local_peer_records.insert(
+                    local_peer_records.end(),
+                    {static_cast<long long>(stage), 0,
+                     static_cast<long long>(exchange.destinations[index]),
+                     static_cast<long long>(items),
+                     static_cast<long long>(items * exchange.item_bytes)});
+            }
+            for (std::size_t index = 0; index < exchange.sources.size(); ++index) {
+                const std::uint64_t items = exchange.receive_items[index];
+                local_peer_records.insert(
+                    local_peer_records.end(),
+                    {static_cast<long long>(stage), 1,
+                     static_cast<long long>(exchange.sources[index]),
+                     static_cast<long long>(items),
+                     static_cast<long long>(items * exchange.item_bytes)});
+            }
+        }
+
+        const int local_value_count = static_cast<int>(local_peer_records.size());
+        if (rank_ == 0) peer_value_counts.resize(process_count_, 0);
+        MPI_Gather(&local_value_count, 1, MPI_INT,
+                   rank_ == 0 ? peer_value_counts.data() : nullptr,
+                   1, MPI_INT, 0, comm_);
+
+        if (rank_ == 0) {
+            peer_value_displacements.resize(process_count_, 0);
+            int total_values = 0;
+            for (int rank = 0; rank < process_count_; ++rank) {
+                peer_value_displacements[rank] = total_values;
+                total_values += peer_value_counts[rank];
+            }
+            all_peer_records.resize(static_cast<std::size_t>(total_values));
+        }
+        MPI_Gatherv(local_peer_records.data(), local_value_count, MPI_LONG_LONG,
+                    rank_ == 0 ? all_peer_records.data() : nullptr,
+                    rank_ == 0 ? peer_value_counts.data() : nullptr,
+                    rank_ == 0 ? peer_value_displacements.data() : nullptr,
+                    MPI_LONG_LONG, 0, comm_);
+    }
+
     if (rank_ == 0) {
         try {
             namespace fs = std::filesystem;
@@ -723,6 +873,24 @@ void Profiler::finalize()
                 }
                 return values;
             };
+            const auto stage_values = [&](const std::string &name,
+                                          double WireStage::*member) {
+                std::vector<double> values(process_count_, 0.0);
+                const auto found = std::find_if(
+                    definitions.begin(), definitions.end(),
+                    [&](const StageDefinition &definition) {
+                        return name == definition.name;
+                    });
+                if (found == definitions.end()) return values;
+                const std::size_t stage = static_cast<std::size_t>(
+                    std::distance(definitions.begin(), found));
+                for (int rank = 0; rank < process_count_; ++rank) {
+                    const WireStage &wire = all_stages[static_cast<std::size_t>(rank) *
+                                                        definitions.size() + stage];
+                    values[rank] = wire.*member;
+                }
+                return values;
+            };
 
             const std::vector<double> total_times = metric_values("total_wall_seconds");
             const ScalarStats total_stats = summarize(total_times);
@@ -733,6 +901,38 @@ void Profiler::finalize()
                 summarize(metric_values("hardware_cache_available"));
             const ScalarStats io_available_stats =
                 summarize(metric_values("process_io_available"));
+            const std::vector<double> volume_alltoall_wait_times = stage_values(
+                "volume_size_exchange_pre_collective_wait", &WireStage::wall_seconds);
+            const std::vector<double> volume_alltoall_times = stage_values(
+                "volume_size_exchange", &WireStage::wall_seconds);
+            const std::vector<double> volume_payload_times = stage_values(
+                "volume_payload_exchange", &WireStage::wall_seconds);
+            const std::vector<double> volume_waitall_times =
+                metric_values("volume_waitall_seconds");
+            const std::vector<double> volume_send_neighbors = stage_values(
+                "volume_payload_exchange", &WireStage::send_messages);
+            const std::vector<double> volume_receive_neighbors = stage_values(
+                "volume_payload_exchange", &WireStage::receive_messages);
+            const std::vector<double> volume_send_bytes = stage_values(
+                "volume_payload_exchange", &WireStage::send_bytes);
+            const std::vector<double> volume_receive_bytes = stage_values(
+                "volume_payload_exchange", &WireStage::receive_bytes);
+            const ScalarStats volume_alltoall_wait_stats = summarize(volume_alltoall_wait_times);
+            const ScalarStats volume_alltoall_stats = summarize(volume_alltoall_times);
+            const ScalarStats volume_payload_stats = summarize(volume_payload_times);
+            const ScalarStats volume_waitall_stats = summarize(volume_waitall_times);
+            const ScalarStats volume_send_neighbor_stats = summarize(volume_send_neighbors);
+            const ScalarStats volume_receive_neighbor_stats = summarize(volume_receive_neighbors);
+            const ScalarStats volume_send_byte_stats = summarize(volume_send_bytes);
+            const ScalarStats volume_receive_byte_stats = summarize(volume_receive_bytes);
+            const double volume_directed_edges = std::accumulate(
+                volume_send_neighbors.begin(), volume_send_neighbors.end(), 0.0);
+            const double possible_directed_edges =
+                process_count_ > 1
+                    ? static_cast<double>(process_count_) * static_cast<double>(process_count_ - 1)
+                    : 0.0;
+            const double volume_edge_density = safe_ratio(
+                volume_directed_edges, possible_directed_edges);
 
             std::map<std::string, std::vector<double>> category_times;
             for (const std::string category : {"setup", "compute", "communication",
@@ -804,7 +1004,12 @@ void Profiler::finalize()
                           "minor_faults_total,major_faults_total,rchar_total_bytes,wchar_total_bytes,"
                           "physical_read_total_bytes,physical_write_total_bytes,"
                           "send_messages_total,receive_messages_total,send_total_bytes,"
-                          "receive_total_bytes,send_max_rank_bytes,receive_max_rank_bytes\n";
+                          "receive_total_bytes,send_max_rank_bytes,receive_max_rank_bytes,"
+                          "time_p50_s,time_p95_s,time_p99_s,"
+                          "send_messages_avg,send_messages_p95,send_messages_p99,send_messages_max,"
+                          "receive_messages_avg,receive_messages_p95,receive_messages_p99,receive_messages_max,"
+                          "send_bytes_avg,send_bytes_p95,send_bytes_p99,"
+                          "receive_bytes_avg,receive_bytes_p95,receive_bytes_p99\n";
                 output << std::setprecision(12);
                 for (std::size_t stage = 0; stage < definitions.size(); ++stage) {
                     std::vector<double> times(process_count_, 0.0);
@@ -814,6 +1019,10 @@ void Profiler::finalize()
                     double send_messages = 0.0, receive_messages = 0.0;
                     double send_bytes = 0.0, receive_bytes = 0.0;
                     double send_bytes_max = 0.0, receive_bytes_max = 0.0;
+                    std::vector<double> send_message_values(process_count_, 0.0);
+                    std::vector<double> receive_message_values(process_count_, 0.0);
+                    std::vector<double> send_byte_values(process_count_, 0.0);
+                    std::vector<double> receive_byte_values(process_count_, 0.0);
                     for (int rank = 0; rank < process_count_; ++rank) {
                         const WireStage &wire = all_stages[static_cast<std::size_t>(rank) *
                                                             definitions.size() + stage];
@@ -834,8 +1043,16 @@ void Profiler::finalize()
                         receive_bytes += wire.receive_bytes;
                         send_bytes_max = std::max(send_bytes_max, wire.send_bytes);
                         receive_bytes_max = std::max(receive_bytes_max, wire.receive_bytes);
+                        send_message_values[rank] = wire.send_messages;
+                        receive_message_values[rank] = wire.receive_messages;
+                        send_byte_values[rank] = wire.send_bytes;
+                        receive_byte_values[rank] = wire.receive_bytes;
                     }
                     const ScalarStats time = summarize(times);
+                    const ScalarStats send_message_stats = summarize(send_message_values);
+                    const ScalarStats receive_message_stats = summarize(receive_message_values);
+                    const ScalarStats send_byte_stats = summarize(send_byte_values);
+                    const ScalarStats receive_byte_stats = summarize(receive_byte_values);
                     output << definitions[stage].name << ',' << definitions[stage].category << ','
                            << time.minimum << ',' << time.average << ',' << time.maximum << ','
                            << safe_ratio(time.maximum, time.average) << ','
@@ -847,7 +1064,24 @@ void Profiler::finalize()
                            << read_bytes << ',' << write_bytes << ','
                            << send_messages << ',' << receive_messages << ','
                            << send_bytes << ',' << receive_bytes << ','
-                           << send_bytes_max << ',' << receive_bytes_max << '\n';
+                           << send_bytes_max << ',' << receive_bytes_max << ','
+                           << percentile(times, 0.50) << ','
+                           << percentile(times, 0.95) << ','
+                           << percentile(times, 0.99) << ','
+                           << send_message_stats.average << ','
+                           << percentile(send_message_values, 0.95) << ','
+                           << percentile(send_message_values, 0.99) << ','
+                           << send_message_stats.maximum << ','
+                           << receive_message_stats.average << ','
+                           << percentile(receive_message_values, 0.95) << ','
+                           << percentile(receive_message_values, 0.99) << ','
+                           << receive_message_stats.maximum << ','
+                           << send_byte_stats.average << ','
+                           << percentile(send_byte_values, 0.95) << ','
+                           << percentile(send_byte_values, 0.99) << ','
+                           << receive_byte_stats.average << ','
+                           << percentile(receive_byte_values, 0.95) << ','
+                           << percentile(receive_byte_values, 0.99) << '\n';
                 }
             }
 
@@ -896,6 +1130,281 @@ void Profiler::finalize()
                 }
             }
 
+            if (config_.collect_communication_graph) {
+                struct RankPeerGraph {
+                    std::vector<int> outgoing;
+                    std::vector<int> incoming;
+                    std::vector<std::uint64_t> send_items;
+                    std::vector<std::uint64_t> receive_items;
+                    std::uint64_t send_bytes = 0;
+                    std::uint64_t receive_bytes = 0;
+                };
+                struct EdgeObservation {
+                    bool sender_seen = false;
+                    bool receiver_seen = false;
+                    std::uint64_t send_items = 0;
+                    std::uint64_t receive_items = 0;
+                    std::uint64_t send_bytes = 0;
+                    std::uint64_t receive_bytes = 0;
+                };
+
+                const auto &peer_definitions = peer_exchange_definitions();
+                std::vector<std::vector<RankPeerGraph>> rank_graphs(
+                    peer_definitions.size(),
+                    std::vector<RankPeerGraph>(static_cast<std::size_t>(process_count_)));
+                std::map<std::tuple<std::size_t, int, int>, EdgeObservation> edges;
+
+                for (int rank = 0; rank < process_count_; ++rank) {
+                    const int value_count = peer_value_counts[rank];
+                    if (value_count % peer_record_width != 0) {
+                        throw std::runtime_error("corrupt communication graph record width");
+                    }
+                    const int begin = peer_value_displacements[rank];
+                    for (int value = 0; value < value_count; value += peer_record_width) {
+                        const std::size_t offset = static_cast<std::size_t>(begin + value);
+                        const long long stage_value = all_peer_records[offset];
+                        const long long direction = all_peer_records[offset + 1];
+                        const long long peer_value = all_peer_records[offset + 2];
+                        const long long item_value = all_peer_records[offset + 3];
+                        const long long byte_value = all_peer_records[offset + 4];
+                        if (stage_value < 0 ||
+                            stage_value >= static_cast<long long>(peer_definitions.size()) ||
+                            (direction != 0 && direction != 1) ||
+                            peer_value < 0 || peer_value >= process_count_ ||
+                            peer_value == rank || item_value < 0 || byte_value < 0) {
+                            throw std::runtime_error("invalid communication graph record");
+                        }
+
+                        const std::size_t stage = static_cast<std::size_t>(stage_value);
+                        const int peer = static_cast<int>(peer_value);
+                        const std::uint64_t items = static_cast<std::uint64_t>(item_value);
+                        const std::uint64_t bytes = static_cast<std::uint64_t>(byte_value);
+                        RankPeerGraph &graph = rank_graphs[stage][rank];
+                        if (direction == 0) {
+                            graph.outgoing.push_back(peer);
+                            graph.send_items.push_back(items);
+                            graph.send_bytes += bytes;
+                            EdgeObservation &edge = edges[{stage, rank, peer}];
+                            edge.sender_seen = true;
+                            edge.send_items = items;
+                            edge.send_bytes = bytes;
+                        } else {
+                            graph.incoming.push_back(peer);
+                            graph.receive_items.push_back(items);
+                            graph.receive_bytes += bytes;
+                            EdgeObservation &edge = edges[{stage, peer, rank}];
+                            edge.receiver_seen = true;
+                            edge.receive_items = items;
+                            edge.receive_bytes = bytes;
+                        }
+                    }
+                }
+
+                {
+                    std::ofstream output = open_output_file(
+                        run_directory / "communication_peers.csv");
+                    output << "rank,host,stage,num_s,num_r,out_neighbors,in_neighbors,"
+                              "out_items_by_peer,in_items_by_peer,only_out_neighbors,"
+                              "only_in_neighbors,neighbor_union,asymmetry_ratio,"
+                              "send_items,receive_items,send_bytes,receive_bytes\n";
+                    output << std::setprecision(12);
+                    for (std::size_t stage = 0; stage < peer_definitions.size(); ++stage) {
+                        for (int rank = 0; rank < process_count_; ++rank) {
+                            RankPeerGraph &graph = rank_graphs[stage][rank];
+                            std::vector<std::pair<int, std::uint64_t>> outgoing_pairs;
+                            std::vector<std::pair<int, std::uint64_t>> incoming_pairs;
+                            for (std::size_t index = 0; index < graph.outgoing.size(); ++index) {
+                                outgoing_pairs.emplace_back(
+                                    graph.outgoing[index], graph.send_items[index]);
+                            }
+                            for (std::size_t index = 0; index < graph.incoming.size(); ++index) {
+                                incoming_pairs.emplace_back(
+                                    graph.incoming[index], graph.receive_items[index]);
+                            }
+                            std::sort(outgoing_pairs.begin(), outgoing_pairs.end());
+                            std::sort(incoming_pairs.begin(), incoming_pairs.end());
+                            graph.outgoing.clear();
+                            graph.send_items.clear();
+                            graph.incoming.clear();
+                            graph.receive_items.clear();
+                            for (const auto &[peer, items] : outgoing_pairs) {
+                                graph.outgoing.push_back(peer);
+                                graph.send_items.push_back(items);
+                            }
+                            for (const auto &[peer, items] : incoming_pairs) {
+                                graph.incoming.push_back(peer);
+                                graph.receive_items.push_back(items);
+                            }
+
+                            std::vector<int> only_out;
+                            std::vector<int> only_in;
+                            std::vector<int> neighbor_union;
+                            std::set_difference(
+                                graph.outgoing.begin(), graph.outgoing.end(),
+                                graph.incoming.begin(), graph.incoming.end(),
+                                std::back_inserter(only_out));
+                            std::set_difference(
+                                graph.incoming.begin(), graph.incoming.end(),
+                                graph.outgoing.begin(), graph.outgoing.end(),
+                                std::back_inserter(only_in));
+                            std::set_union(
+                                graph.outgoing.begin(), graph.outgoing.end(),
+                                graph.incoming.begin(), graph.incoming.end(),
+                                std::back_inserter(neighbor_union));
+                            const double asymmetry = safe_ratio(
+                                static_cast<double>(only_out.size() + only_in.size()),
+                                static_cast<double>(neighbor_union.size()));
+                            const std::uint64_t send_items = std::accumulate(
+                                graph.send_items.begin(), graph.send_items.end(),
+                                static_cast<std::uint64_t>(0));
+                            const std::uint64_t receive_items = std::accumulate(
+                                graph.receive_items.begin(), graph.receive_items.end(),
+                                static_cast<std::uint64_t>(0));
+                            output << rank << ',' << csv_escape(hosts[rank]) << ','
+                                   << peer_definitions[stage] << ','
+                                   << graph.outgoing.size() << ',' << graph.incoming.size() << ','
+                                   << csv_escape(join_integers(graph.outgoing)) << ','
+                                   << csv_escape(join_integers(graph.incoming)) << ','
+                                   << csv_escape(join_peer_items(
+                                          graph.outgoing, graph.send_items)) << ','
+                                   << csv_escape(join_peer_items(
+                                          graph.incoming, graph.receive_items)) << ','
+                                   << csv_escape(join_integers(only_out)) << ','
+                                   << csv_escape(join_integers(only_in)) << ','
+                                   << neighbor_union.size() << ',' << asymmetry << ','
+                                   << send_items << ',' << receive_items << ','
+                                   << graph.send_bytes << ',' << graph.receive_bytes << '\n';
+                        }
+                    }
+                }
+
+                {
+                    std::ofstream output = open_output_file(
+                        run_directory / "communication_edges.csv");
+                    output << "stage,source_rank,destination_rank,send_items,"
+                              "receiver_items,send_bytes,receiver_bytes,sender_seen,"
+                              "receiver_seen,count_match\n";
+                    for (const auto &[key, edge] : edges) {
+                        const auto &[stage, source, destination] = key;
+                        const bool match = edge.sender_seen && edge.receiver_seen &&
+                                           edge.send_items == edge.receive_items &&
+                                           edge.send_bytes == edge.receive_bytes;
+                        output << peer_definitions[stage] << ',' << source << ','
+                               << destination << ',' << edge.send_items << ','
+                               << edge.receive_items << ',' << edge.send_bytes << ','
+                               << edge.receive_bytes << ',' << (edge.sender_seen ? 1 : 0) << ','
+                               << (edge.receiver_seen ? 1 : 0) << ',' << (match ? 1 : 0) << '\n';
+                    }
+                }
+
+                {
+                    std::ofstream output = open_output_file(
+                        run_directory / "communication_graph_summary.csv");
+                    output << "stage,processes,directed_edges,possible_directed_edges,"
+                              "edge_density,edge_density_percent,zero_edge_sparsity_percent,"
+                              "num_s_num_r_different_ranks,asymmetric_ranks,"
+                              "rank_asymmetry_avg,rank_asymmetry_p95,"
+                              "rank_asymmetry_p99,rank_asymmetry_max,count_mismatch_edges,"
+                              "missing_sender_edges,missing_receiver_edges,"
+                              "send_neighbors_avg,send_neighbors_p95,send_neighbors_p99,send_neighbors_max,"
+                              "receive_neighbors_avg,receive_neighbors_p95,receive_neighbors_p99,receive_neighbors_max,"
+                              "send_items_total,receive_items_total,send_bytes_total,receive_bytes_total\n";
+                    output << std::setprecision(12);
+                    for (std::size_t stage = 0; stage < peer_definitions.size(); ++stage) {
+                        std::vector<double> asymmetries(process_count_, 0.0);
+                        std::vector<double> send_neighbors(process_count_, 0.0);
+                        std::vector<double> receive_neighbors(process_count_, 0.0);
+                        std::uint64_t send_items_total = 0;
+                        std::uint64_t receive_items_total = 0;
+                        std::uint64_t send_bytes_total = 0;
+                        std::uint64_t receive_bytes_total = 0;
+                        int asymmetric_ranks = 0;
+                        int count_different_ranks = 0;
+                        for (int rank = 0; rank < process_count_; ++rank) {
+                            const RankPeerGraph &graph = rank_graphs[stage][rank];
+                            std::vector<int> only_out;
+                            std::vector<int> only_in;
+                            std::vector<int> neighbor_union;
+                            std::set_difference(
+                                graph.outgoing.begin(), graph.outgoing.end(),
+                                graph.incoming.begin(), graph.incoming.end(),
+                                std::back_inserter(only_out));
+                            std::set_difference(
+                                graph.incoming.begin(), graph.incoming.end(),
+                                graph.outgoing.begin(), graph.outgoing.end(),
+                                std::back_inserter(only_in));
+                            std::set_union(
+                                graph.outgoing.begin(), graph.outgoing.end(),
+                                graph.incoming.begin(), graph.incoming.end(),
+                                std::back_inserter(neighbor_union));
+                            asymmetries[rank] = safe_ratio(
+                                static_cast<double>(only_out.size() + only_in.size()),
+                                static_cast<double>(neighbor_union.size()));
+                            if (!only_out.empty() || !only_in.empty()) ++asymmetric_ranks;
+                            if (graph.outgoing.size() != graph.incoming.size()) {
+                                ++count_different_ranks;
+                            }
+                            send_neighbors[rank] = static_cast<double>(graph.outgoing.size());
+                            receive_neighbors[rank] = static_cast<double>(graph.incoming.size());
+                            send_items_total += std::accumulate(
+                                graph.send_items.begin(), graph.send_items.end(),
+                                static_cast<std::uint64_t>(0));
+                            receive_items_total += std::accumulate(
+                                graph.receive_items.begin(), graph.receive_items.end(),
+                                static_cast<std::uint64_t>(0));
+                            send_bytes_total += graph.send_bytes;
+                            receive_bytes_total += graph.receive_bytes;
+                        }
+
+                        double directed_edges = 0.0;
+                        int mismatch_edges = 0;
+                        int missing_sender_edges = 0;
+                        int missing_receiver_edges = 0;
+                        for (const auto &[key, edge] : edges) {
+                            if (std::get<0>(key) != stage) continue;
+                            if (edge.sender_seen) directed_edges += 1.0;
+                            if (!edge.sender_seen) ++missing_sender_edges;
+                            if (!edge.receiver_seen) ++missing_receiver_edges;
+                            if (!edge.sender_seen || !edge.receiver_seen ||
+                                edge.send_items != edge.receive_items ||
+                                edge.send_bytes != edge.receive_bytes) {
+                                ++mismatch_edges;
+                            }
+                        }
+                        const double possible_edges =
+                            process_count_ > 1
+                                ? static_cast<double>(process_count_) *
+                                      static_cast<double>(process_count_ - 1)
+                                : 0.0;
+                        const double density = safe_ratio(directed_edges, possible_edges);
+                        const double sparsity_percent =
+                            possible_edges > 0.0 ? 100.0 * (1.0 - density) : 0.0;
+                        const ScalarStats asymmetry_stats = summarize(asymmetries);
+                        const ScalarStats send_neighbor_stats = summarize(send_neighbors);
+                        const ScalarStats receive_neighbor_stats = summarize(receive_neighbors);
+                        output << peer_definitions[stage] << ',' << process_count_ << ','
+                               << directed_edges << ',' << possible_edges << ',' << density << ','
+                               << 100.0 * density << ',' << sparsity_percent << ','
+                               << count_different_ranks << ',' << asymmetric_ranks << ','
+                               << asymmetry_stats.average << ','
+                               << percentile(asymmetries, 0.95) << ','
+                               << percentile(asymmetries, 0.99) << ','
+                               << asymmetry_stats.maximum << ',' << mismatch_edges << ','
+                               << missing_sender_edges << ',' << missing_receiver_edges << ','
+                               << send_neighbor_stats.average << ','
+                               << percentile(send_neighbors, 0.95) << ','
+                               << percentile(send_neighbors, 0.99) << ','
+                               << send_neighbor_stats.maximum << ','
+                               << receive_neighbor_stats.average << ','
+                               << percentile(receive_neighbors, 0.95) << ','
+                               << percentile(receive_neighbors, 0.99) << ','
+                               << receive_neighbor_stats.maximum << ','
+                               << send_items_total << ',' << receive_items_total << ','
+                               << send_bytes_total << ',' << receive_bytes_total << '\n';
+                    }
+                }
+            }
+
             const double communication_fraction_avg = 100.0 * safe_ratio(
                 communication_stats.average, total_stats.average);
             const double communication_fraction_max = 100.0 * safe_ratio(
@@ -930,7 +1439,18 @@ void Profiler::finalize()
                           "logical_write_total_bytes,physical_read_total_bytes,"
                           "physical_write_total_bytes,peak_rss_avg_mib,peak_rss_max_mib,"
                           "local_volume_elements_avg,local_volume_elements_max,"
-                          "volume_imbalance_max_over_avg,core_only\n";
+                          "volume_imbalance_max_over_avg,"
+                          "volume_alltoall_wait_p95_s,volume_alltoall_wait_p99_s,volume_alltoall_wait_max_s,"
+                          "volume_alltoall_p95_s,volume_alltoall_p99_s,volume_alltoall_max_s,"
+                          "volume_payload_p95_s,volume_payload_p99_s,volume_payload_max_s,"
+                          "volume_waitall_p95_s,volume_waitall_p99_s,volume_waitall_max_s,"
+                          "volume_send_neighbors_avg,volume_send_neighbors_p95,"
+                          "volume_send_neighbors_p99,volume_send_neighbors_max,"
+                          "volume_receive_neighbors_avg,volume_receive_neighbors_p95,"
+                          "volume_receive_neighbors_p99,volume_receive_neighbors_max,"
+                          "volume_send_bytes_avg,volume_send_bytes_p95,volume_send_bytes_p99,volume_send_bytes_max,"
+                          "volume_receive_bytes_avg,volume_receive_bytes_p95,volume_receive_bytes_p99,volume_receive_bytes_max,"
+                          "volume_directed_edges,volume_edge_density,volume_graph_capture,core_only\n";
                 output << std::setprecision(12)
                        << csv_escape(config_.experiment) << ',' << process_count_ << ','
                        << config_.repeat << ',' << timestamp << ','
@@ -959,6 +1479,36 @@ void Profiler::finalize()
                        << peak_rss_stats.average << ',' << peak_rss_stats.maximum << ','
                        << local_volume_stats.average << ',' << local_volume_stats.maximum << ','
                        << safe_ratio(local_volume_stats.maximum, local_volume_stats.average) << ','
+                       << percentile(volume_alltoall_wait_times, 0.95) << ','
+                       << percentile(volume_alltoall_wait_times, 0.99) << ','
+                       << volume_alltoall_wait_stats.maximum << ','
+                       << percentile(volume_alltoall_times, 0.95) << ','
+                       << percentile(volume_alltoall_times, 0.99) << ','
+                       << volume_alltoall_stats.maximum << ','
+                       << percentile(volume_payload_times, 0.95) << ','
+                       << percentile(volume_payload_times, 0.99) << ','
+                       << volume_payload_stats.maximum << ','
+                       << percentile(volume_waitall_times, 0.95) << ','
+                       << percentile(volume_waitall_times, 0.99) << ','
+                       << volume_waitall_stats.maximum << ','
+                       << volume_send_neighbor_stats.average << ','
+                       << percentile(volume_send_neighbors, 0.95) << ','
+                       << percentile(volume_send_neighbors, 0.99) << ','
+                       << volume_send_neighbor_stats.maximum << ','
+                       << volume_receive_neighbor_stats.average << ','
+                       << percentile(volume_receive_neighbors, 0.95) << ','
+                       << percentile(volume_receive_neighbors, 0.99) << ','
+                       << volume_receive_neighbor_stats.maximum << ','
+                       << volume_send_byte_stats.average << ','
+                       << percentile(volume_send_bytes, 0.95) << ','
+                       << percentile(volume_send_bytes, 0.99) << ','
+                       << volume_send_byte_stats.maximum << ','
+                       << volume_receive_byte_stats.average << ','
+                       << percentile(volume_receive_bytes, 0.95) << ','
+                       << percentile(volume_receive_bytes, 0.99) << ','
+                       << volume_receive_byte_stats.maximum << ','
+                       << volume_directed_edges << ',' << volume_edge_density << ','
+                       << (config_.collect_communication_graph ? 1 : 0) << ','
                        << (config_.core_only ? 1 : 0) << '\n';
             }
 
@@ -969,6 +1519,8 @@ void Profiler::finalize()
                 output << "repeat=" << config_.repeat << '\n';
                 output << "timestamp=" << timestamp << '\n';
                 output << "core_only=" << (config_.core_only ? "true" : "false") << '\n';
+                output << "communication_graph_requested="
+                       << (config_.collect_communication_graph ? "true" : "false") << '\n';
                 output << "hardware_cache_requested="
                        << (config_.collect_hardware_cache ? "true" : "false") << '\n';
                 output << "hardware_cache_available_ranks="
@@ -1127,6 +1679,11 @@ void Profiler::finalize()
                 output << "  rank_stages.csv   各进程逐阶段原始指标\n";
                 output << "  rank_metrics.csv  各进程网格规模与内存指标\n";
                 output << "  metadata.txt      命令、平台和参数信息\n";
+                if (config_.collect_communication_graph) {
+                    output << "  communication_peers.csv        逐 rank 收发邻居集\n";
+                    output << "  communication_edges.csv        逐有向边消息量核对\n";
+                    output << "  communication_graph_summary.csv 通信图密度与不对称统计\n";
+                }
             }
 
             std::cout << "[PROFILE] results written to " << run_directory.string() << std::endl;

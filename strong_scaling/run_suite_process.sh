@@ -17,14 +17,22 @@ for mode in "${suite_modes_array[@]}"; do
         core_cache)
             mode_core_only=1
             mode_cache_counters=1
+            mode_comm_graph=0
             ;;
         core_timing)
             mode_core_only=1
             mode_cache_counters=0
+            mode_comm_graph=0
             ;;
         full_io)
             mode_core_only=0
             mode_cache_counters=0
+            mode_comm_graph=0
+            ;;
+        comm_graph)
+            mode_core_only=1
+            mode_cache_counters=0
+            mode_comm_graph=1
             ;;
         *)
             echo "[ERROR] 不支持的统一实验模式: ${mode}" >&2
@@ -45,6 +53,7 @@ for mode in "${suite_modes_array[@]}"; do
     RUN_NAME="${mode}" \
     CORE_ONLY="${mode_core_only}" \
     CACHE_COUNTERS="${mode_cache_counters}" \
+    COMM_GRAPH="${mode_comm_graph}" \
     ANALYZE_AFTER_RUN=0 \
     ANALYSIS_ONLY=0 \
     bash "${SCRIPT_DIR}/run_experiments.sh"

@@ -82,6 +82,8 @@ SUITE_MODES="core_timing core_cache full_io" \
 2. `core_cache`：相同核心路径并启用 CPU（中央处理器）硬件缓存计数；
 3. `full_io`：完整结果写出和 I/O（输入/输出）计时。
 
+可选的 `comm_graph`（通信图诊断）模式仍走核心路径，但额外保存逐 rank 的出/入邻居集合和逐边消息量。它不启用硬件缓存计数；明细汇聚和 CSV 写出发生在应用总时间确定之后。为使主曲线与历史数据口径完全一致，默认套件不自动加入该模式，建议针对临界规模单独运行。
+
 不同 P 作业可以互相重叠运行，但最早启动时间依次错开。默认间隔为 120 秒，例如 P 序列中的第 1、2、3 个作业分别在提交后 0、120、240 秒具备启动资格。三种模式仍分开执行，避免硬件计数器或结果写出污染主计时。一次提交执行哪些模式可自由选择，也接受逗号分隔，例如：
 
 ```bash
@@ -108,6 +110,7 @@ SUITE_MODES="core_timing,full_io" \
 | `SUITE_MODE` | `1` | `1` 执行自定义模式套件；设为 `0` 可兼容原来的单模式调用 |
 | `CORE_ONLY` | 套件按模式设置 | 单模式时，`1` 跳过普通结果写出，`0` 测完整 I/O |
 | `CACHE_COUNTERS` | 套件按模式设置 | 单模式时是否采集硬件缓存计数 |
+| `COMM_GRAPH` | 套件按模式设置 | 单模式时是否保存逐 rank/逐边通信图明细；主计时实验保持 `0` |
 | `START_INTERVAL_SECONDS` | `120` | 相邻 P 作业的最早启动时间间隔；`0` 表示同时具备启动资格 |
 | `SERIALIZE_JOBS` | `0` | 默认 `0`，P 作业独立并可并行；设为 `1` 才启用旧的 `afterany` 串行方式 |
 | `SUITE_MODES` | `core_timing core_cache full_io` | 一次提交包含的模式，可用空格或逗号分隔 |
@@ -132,6 +135,28 @@ RANKS_PER_NODE=4 SBATCH_EXTRA_ARGS="--time=02:00:00" \
 START_INTERVAL_SECONDS=180 \
 SUITE_MODES="core_timing core_cache full_io" \
   bash strong_scaling/submit_experiments.sh
+```
+
+针对 256--512 rank 的通信问题，推荐先做独立诊断批次：
+
+```bash
+PROCESS_COUNTS="256 384 448 512" \
+RANKS_PER_NODE=16 REPEATS=3 \
+LEVELS=2 REFINES=3 \
+EXPERIMENT=adjacency_comm_graph \
+SUITE_MODES="comm_graph" \
+  bash strong_scaling/submit_experiments.sh
+```
+
+如果已经处于一个覆盖所需节点数的 allocation（资源分配）中，也可以直接运行单模式：
+
+```bash
+PROCESS_COUNTS="256 384 448 512" \
+RANKS_PER_NODE=16 REPEATS=3 \
+LEVELS=2 REFINES=3 CORE_ONLY=1 \
+CACHE_COUNTERS=0 COMM_GRAPH=1 \
+EXPERIMENT=adjacency_comm_graph \
+  bash strong_scaling/run_experiments.sh
 ```
 
 ## 4. 已有 allocation 中直接运行
@@ -181,6 +206,18 @@ strong_scaling_results/
         └── mode_analysis_status.tsv # 各模式汇总脚本状态
 ```
 
+`comm_graph` 的每次运行目录还包含：
+
+| 文件 | 内容 |
+|---|---|
+| `rank_metrics.csv` | 每个 rank 的 `num_s`/`num_r`、消息元素数、精确 `MPI_Waitall` 时间等标量 |
+| `stages.csv` | 各阶段跨 rank 的 P50/P95/P99/Max、邻居数和消息字节分位数 |
+| `communication_peers.csv` | 逐 rank 的出/入邻居集合、只出/只入邻居及逐邻居元素数 |
+| `communication_edges.csv` | 逐有向边的发送端/接收端观察值与计数一致性 |
+| `communication_graph_summary.csv` | \(|E|/[P(P-1)]\) 有向图密度、稀疏度和不对称统计 |
+| `analysis/communication_report.txt` | 多次重复取中位数后的可读通信诊断报告 |
+| `analysis/communication_summary.csv` | 可直接绘图或写入论文表格的汇总数据 |
+
 这样每批数据、运行环境、命令、日志和分析都在同一个目录中；后续只需提供该目录，即可直接读取并比较瓶颈。
 
 ## 6. 单独重新汇总
@@ -202,6 +239,9 @@ E(P)=\frac{S(P)}{P/P_0}\times100\%.
 ## 7. 指标解释与注意事项
 
 - `--profile-core-only` 保留网格生成、全局编号和邻接通信，跳过普通网格结果写出、质量评价和旧版计时文件；因此适合分析算法与通信扩展性。
+- `--profile-comm-graph` 才会保存完整邻居集合；关闭时仍采集低开销的 `num_s`、`num_r`、消息量、`MPI_Alltoall` 和 `MPI_Waitall` 分位数。通信图明细在 `total_wall_seconds` 固定后汇聚，因此不会计入报告中的端到端时间，但本地邻居列表复制仍只建议在专用诊断批次使用。
+- 图密度按有向非自环图定义为 \(|E|/[P(P-1)]\)，零边稀疏度为 \(1-|E|/[P(P-1)]\)。出邻居集合与入邻居集合不同不一定是错误；`communication_edges.csv` 中发送/接收计数不匹配才直接指向通信描述不一致。
+- `volume_size_exchange_pre_collective_wait` 是进入 `MPI_Alltoall` 前的到达差；`volume_size_exchange` 是对齐后的 Alltoall 执行；`volume_waitall_seconds` 是体单元非阻塞收发中 `MPI_Waitall` 本身的时间。三者应分开解释。
 - Linux `perf_event_open` 负责 cache references/misses、cycles、instructions 和 IPC。若 `perf_event_paranoid` 权限不足，程序仍会完成并将缓存指标标为 `N/A`。
 - 通用 `cache-references`/`cache-misses` 的精确定义随 CPU 型号变化，只应在相同节点型号、相同绑核方式下横向比较。
 - `Profile coverage`（计时覆盖率）之外的时间列为 `unprofiled`（未细分），可用于发现尚未插桩的路径。

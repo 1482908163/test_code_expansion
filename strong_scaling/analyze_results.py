@@ -91,6 +91,24 @@ def read_stage_runs(runs: list[dict[str, str]]) -> list[dict[str, str]]:
     return stage_runs
 
 
+def read_graph_runs(runs: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Read optional communication-graph detail produced by diagnostic runs."""
+
+    graph_runs: list[dict[str, str]] = []
+    for run in runs:
+        path = Path(run["source_file"]).with_name("communication_graph_summary.csv")
+        if not path.is_file():
+            continue
+        with path.open(newline="", encoding="utf-8") as stream:
+            for row in csv.DictReader(stream):
+                row["experiment"] = run["experiment"]
+                row["processes"] = run["processes"]
+                row["repeat"] = run["repeat"]
+                row["source_file"] = str(path)
+                graph_runs.append(row)
+    return graph_runs
+
+
 def numeric(row: dict[str, str], key: str) -> float:
     value = row.get(key, "")
     if value == "":
@@ -173,6 +191,7 @@ def main() -> None:
     if len(modes) != 1:
         raise ValueError("Core-only and full-I/O runs must be analyzed separately")
     stage_runs = read_stage_runs(runs)
+    graph_runs = read_graph_runs(runs)
     grouped: dict[int, list[dict[str, str]]] = defaultdict(list)
     for row in runs:
         grouped[int(row["processes"])].append(row)
@@ -436,6 +455,37 @@ def main() -> None:
         "setup_max_s",
         "compute_max_s",
         "postprocess_max_s",
+        "volume_alltoall_wait_p95_s",
+        "volume_alltoall_wait_p99_s",
+        "volume_alltoall_wait_max_s",
+        "volume_alltoall_p95_s",
+        "volume_alltoall_p99_s",
+        "volume_alltoall_max_s",
+        "volume_payload_p95_s",
+        "volume_payload_p99_s",
+        "volume_payload_max_s",
+        "volume_waitall_p95_s",
+        "volume_waitall_p99_s",
+        "volume_waitall_max_s",
+        "volume_send_neighbors_avg",
+        "volume_send_neighbors_p95",
+        "volume_send_neighbors_p99",
+        "volume_send_neighbors_max",
+        "volume_receive_neighbors_avg",
+        "volume_receive_neighbors_p95",
+        "volume_receive_neighbors_p99",
+        "volume_receive_neighbors_max",
+        "volume_send_bytes_avg",
+        "volume_send_bytes_p95",
+        "volume_send_bytes_p99",
+        "volume_send_bytes_max",
+        "volume_receive_bytes_avg",
+        "volume_receive_bytes_p95",
+        "volume_receive_bytes_p99",
+        "volume_receive_bytes_max",
+        "volume_directed_edges",
+        "volume_edge_density",
+        "volume_graph_capture",
     ]
     with (output_dir / "scaling_summary.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=summary_fields)
@@ -474,6 +524,9 @@ def main() -> None:
                 "category": rows[0]["category"],
                 "time_avg_s": median_field(rows, "time_avg_s"),
                 "time_max_s": median_field(rows, "time_max_s"),
+                "time_p50_s": median_field(rows, "time_p50_s"),
+                "time_p95_s": median_field(rows, "time_p95_s"),
+                "time_p99_s": median_field(rows, "time_p99_s"),
                 "max_over_avg": median_field(rows, "max_over_avg"),
                 "max_percent_of_total": median_field(rows, "max_percent_of_total"),
                 "cache_valid_repetitions": len(cache_rows),
@@ -504,6 +557,20 @@ def main() -> None:
                 "receive_total_bytes": median_field(rows, "receive_total_bytes"),
                 "send_max_rank_bytes": median_field(rows, "send_max_rank_bytes"),
                 "receive_max_rank_bytes": median_field(rows, "receive_max_rank_bytes"),
+                "send_messages_avg": median_field(rows, "send_messages_avg"),
+                "send_messages_p95": median_field(rows, "send_messages_p95"),
+                "send_messages_p99": median_field(rows, "send_messages_p99"),
+                "send_messages_max": median_field(rows, "send_messages_max"),
+                "receive_messages_avg": median_field(rows, "receive_messages_avg"),
+                "receive_messages_p95": median_field(rows, "receive_messages_p95"),
+                "receive_messages_p99": median_field(rows, "receive_messages_p99"),
+                "receive_messages_max": median_field(rows, "receive_messages_max"),
+                "send_bytes_avg": median_field(rows, "send_bytes_avg"),
+                "send_bytes_p95": median_field(rows, "send_bytes_p95"),
+                "send_bytes_p99": median_field(rows, "send_bytes_p99"),
+                "receive_bytes_avg": median_field(rows, "receive_bytes_avg"),
+                "receive_bytes_p95": median_field(rows, "receive_bytes_p95"),
+                "receive_bytes_p99": median_field(rows, "receive_bytes_p99"),
             }
         )
 
@@ -515,6 +582,11 @@ def main() -> None:
 
     collective_pairs = [
         ("face_allgatherv", "face_pre_collective_wait", "face_allgatherv"),
+        (
+            "volume_size_exchange",
+            "volume_size_exchange_pre_collective_wait",
+            "volume_size_exchange",
+        ),
         (
             "vertex_count_allgather",
             "vertex_count_pre_collective_wait",
@@ -596,6 +668,130 @@ def main() -> None:
         writer = csv.DictWriter(stream, fieldnames=collective_split_fields)
         writer.writeheader()
         writer.writerows(collective_split_rows)
+
+    graph_grouped: dict[tuple[int, str], list[dict[str, str]]] = defaultdict(list)
+    for row in graph_runs:
+        graph_grouped[(int(row["processes"]), row["stage"])].append(row)
+
+    summary_by_process = {int(row["processes"]): row for row in summary_rows}
+    communication_summary_rows: list[dict[str, float | int | str]] = []
+    for processes in process_counts:
+        run_row = summary_by_process[processes]
+        graph_rows = graph_grouped.get((processes, "volume_payload_exchange"), [])
+        density = float(run_row.get("volume_edge_density", math.nan))
+        sparsity_percent = (
+            100.0 * (1.0 - density)
+            if processes > 1 and math.isfinite(density)
+            else math.nan
+        )
+        communication_summary_rows.append(
+            {
+                "experiment": run_row["experiment"],
+                "processes": processes,
+                "repetitions": run_row["repetitions"],
+                "graph_capture_repetitions": len(graph_rows),
+                "volume_alltoall_wait_p95_s": run_row.get(
+                    "volume_alltoall_wait_p95_s", math.nan
+                ),
+                "volume_alltoall_wait_p99_s": run_row.get(
+                    "volume_alltoall_wait_p99_s", math.nan
+                ),
+                "volume_alltoall_wait_max_s": run_row.get(
+                    "volume_alltoall_wait_max_s", math.nan
+                ),
+                "volume_alltoall_p95_s": run_row.get(
+                    "volume_alltoall_p95_s", math.nan
+                ),
+                "volume_alltoall_p99_s": run_row.get(
+                    "volume_alltoall_p99_s", math.nan
+                ),
+                "volume_alltoall_max_s": run_row.get(
+                    "volume_alltoall_max_s", math.nan
+                ),
+                "volume_payload_p95_s": run_row.get("volume_payload_p95_s", math.nan),
+                "volume_payload_p99_s": run_row.get("volume_payload_p99_s", math.nan),
+                "volume_payload_max_s": run_row.get("volume_payload_max_s", math.nan),
+                "volume_waitall_p95_s": run_row.get("volume_waitall_p95_s", math.nan),
+                "volume_waitall_p99_s": run_row.get("volume_waitall_p99_s", math.nan),
+                "volume_waitall_max_s": run_row.get("volume_waitall_max_s", math.nan),
+                "volume_send_neighbors_avg": run_row.get(
+                    "volume_send_neighbors_avg", math.nan
+                ),
+                "volume_send_neighbors_p95": run_row.get(
+                    "volume_send_neighbors_p95", math.nan
+                ),
+                "volume_send_neighbors_p99": run_row.get(
+                    "volume_send_neighbors_p99", math.nan
+                ),
+                "volume_send_neighbors_max": run_row.get(
+                    "volume_send_neighbors_max", math.nan
+                ),
+                "volume_receive_neighbors_avg": run_row.get(
+                    "volume_receive_neighbors_avg", math.nan
+                ),
+                "volume_receive_neighbors_p95": run_row.get(
+                    "volume_receive_neighbors_p95", math.nan
+                ),
+                "volume_receive_neighbors_p99": run_row.get(
+                    "volume_receive_neighbors_p99", math.nan
+                ),
+                "volume_receive_neighbors_max": run_row.get(
+                    "volume_receive_neighbors_max", math.nan
+                ),
+                "volume_send_bytes_avg": run_row.get("volume_send_bytes_avg", math.nan),
+                "volume_send_bytes_p95": run_row.get("volume_send_bytes_p95", math.nan),
+                "volume_send_bytes_p99": run_row.get("volume_send_bytes_p99", math.nan),
+                "volume_send_bytes_max": run_row.get("volume_send_bytes_max", math.nan),
+                "volume_receive_bytes_avg": run_row.get(
+                    "volume_receive_bytes_avg", math.nan
+                ),
+                "volume_receive_bytes_p95": run_row.get(
+                    "volume_receive_bytes_p95", math.nan
+                ),
+                "volume_receive_bytes_p99": run_row.get(
+                    "volume_receive_bytes_p99", math.nan
+                ),
+                "volume_receive_bytes_max": run_row.get(
+                    "volume_receive_bytes_max", math.nan
+                ),
+                "volume_directed_edges": run_row.get("volume_directed_edges", math.nan),
+                "volume_possible_directed_edges": (
+                    processes * (processes - 1) if processes > 1 else 0
+                ),
+                "volume_edge_density": density,
+                "volume_edge_density_percent": 100.0 * density,
+                "zero_edge_sparsity_percent": sparsity_percent,
+                "num_s_num_r_different_ranks": median_field(
+                    graph_rows, "num_s_num_r_different_ranks"
+                ),
+                "asymmetric_ranks": median_field(graph_rows, "asymmetric_ranks"),
+                "rank_asymmetry_avg": median_field(graph_rows, "rank_asymmetry_avg"),
+                "rank_asymmetry_p95": median_field(graph_rows, "rank_asymmetry_p95"),
+                "rank_asymmetry_p99": median_field(graph_rows, "rank_asymmetry_p99"),
+                "rank_asymmetry_max": median_field(graph_rows, "rank_asymmetry_max"),
+                "count_mismatch_edges": median_field(
+                    graph_rows, "count_mismatch_edges"
+                ),
+                "missing_sender_edges": median_field(
+                    graph_rows, "missing_sender_edges"
+                ),
+                "missing_receiver_edges": median_field(
+                    graph_rows, "missing_receiver_edges"
+                ),
+                "send_items_total": median_field(graph_rows, "send_items_total"),
+                "receive_items_total": median_field(graph_rows, "receive_items_total"),
+                "send_bytes_total": median_field(graph_rows, "send_bytes_total"),
+                "receive_bytes_total": median_field(graph_rows, "receive_bytes_total"),
+            }
+        )
+
+    communication_fields = list(communication_summary_rows[0].keys())
+    with (output_dir / "communication_summary.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=communication_fields)
+        writer.writeheader()
+        writer.writerows(communication_summary_rows)
 
     first = summary_rows[0]
     last = summary_rows[-1]
@@ -696,6 +892,8 @@ def main() -> None:
         output.write("  stage_scaling.csv    各进程数逐阶段的中位数指标\n")
         output.write("  collective_split.csv 各集合通信的到达等待/对齐执行拆分\n")
         output.write("  collective_split_report.txt 集合通信拆分可读报告\n")
+        output.write("  communication_summary.csv 通信图、消息量与尾部等待汇总\n")
+        output.write("  communication_report.txt 通信诊断可读报告\n")
         output.write("  all_runs.csv         所有重复实验的原始总指标\n")
         output.write("  cold_warm_summary.csv  冷/热页缓存分离汇总\n")
         output.write("  cold_warm_report.txt   冷/热页缓存可读报告\n")
@@ -775,6 +973,82 @@ def main() -> None:
                 f"{format_number(float(row['warm_arrival_wait_fraction_max_percent']), 13, 2)}"
                 f"{format_number(float(row['warm_communication_max_s']), 13)}"
                 f"{format_number(float(row['warm_communication_fraction_max_percent']), 13, 2)}\n"
+            )
+
+    with (output_dir / "communication_report.txt").open(
+        "w", encoding="utf-8"
+    ) as output:
+        output.write("Communication Diagnostics (通信诊断)\n")
+        output.write("=" * 151 + "\n")
+        output.write(
+            "AlltoallWait 是 MPI_Alltoall 前对齐 Barrier 的 rank 到达等待；"
+            "AlltoallExec 是对齐后的 MPI_Alltoall；Waitall 是体单元非阻塞收发的"
+            " MPI_Waitall 精确计时。P95/P99/Max 均在同一次运行的所有 rank 间计算，"
+            "再对重复实验取中位数。\n\n"
+        )
+        output.write(
+            f"{'P':>7} {'Runs':>5} {'Graph':>6} {'A2AWait99':>11} {'A2AWaitMax':>11} "
+            f"{'A2AExec99':>11} {'A2AExecMax':>11} {'Wait95':>10} {'Wait99':>10} "
+            f"{'WaitMax':>10} {'OutN99':>9} {'OutNMax':>9} {'InN99':>9} {'InNMax':>9}\n"
+        )
+        output.write("-" * 151 + "\n")
+        for row in communication_summary_rows:
+            output.write(
+                f"{int(row['processes']):>7}"
+                f"{int(row['repetitions']):>5}"
+                f"{int(row['graph_capture_repetitions']):>6}"
+                f"{format_number(float(row['volume_alltoall_wait_p99_s']), 11, 6)}"
+                f"{format_number(float(row['volume_alltoall_wait_max_s']), 11, 6)}"
+                f"{format_number(float(row['volume_alltoall_p99_s']), 11, 6)}"
+                f"{format_number(float(row['volume_alltoall_max_s']), 11, 6)}"
+                f"{format_number(float(row['volume_waitall_p95_s']), 10, 6)}"
+                f"{format_number(float(row['volume_waitall_p99_s']), 10, 6)}"
+                f"{format_number(float(row['volume_waitall_max_s']), 10, 6)}"
+                f"{format_number(float(row['volume_send_neighbors_p99']), 9, 2)}"
+                f"{format_number(float(row['volume_send_neighbors_max']), 9, 2)}"
+                f"{format_number(float(row['volume_receive_neighbors_p99']), 9, 2)}"
+                f"{format_number(float(row['volume_receive_neighbors_max']), 9, 2)}\n"
+            )
+
+        output.write("\nCommunication graph and message volume (通信图与消息量)\n")
+        output.write(
+            "Density = |E| / [P(P-1)]，E 为有向非自环发送边；"
+            "Zero-edge sparsity = 1 - Density。AsymRanks 表示出邻居集与入邻居集不相同的 rank 数。\n\n"
+        )
+        output.write(
+            f"{'P':>7} {'Edges':>11} {'Density(%)':>12} {'Sparse(%)':>11} "
+            f"{'OutMiB99':>11} {'OutMiBMax':>11} {'InMiB99':>11} {'InMiBMax':>11} "
+            f"{'numS!=numR':>12} {'AsymRanks':>11} {'MismatchE':>11}\n"
+        )
+        output.write("-" * 122 + "\n")
+        for row in communication_summary_rows:
+            output.write(
+                f"{int(row['processes']):>7}"
+                f"{format_number(float(row['volume_directed_edges']), 11, 0)}"
+                f"{format_number(float(row['volume_edge_density_percent']), 12, 5)}"
+                f"{format_number(float(row['zero_edge_sparsity_percent']), 11, 5)}"
+                f"{format_number(float(row['volume_send_bytes_p99']) / (1024**2), 11, 3)}"
+                f"{format_number(float(row['volume_send_bytes_max']) / (1024**2), 11, 3)}"
+                f"{format_number(float(row['volume_receive_bytes_p99']) / (1024**2), 11, 3)}"
+                f"{format_number(float(row['volume_receive_bytes_max']) / (1024**2), 11, 3)}"
+                f"{format_number(float(row['num_s_num_r_different_ranks']), 12, 0)}"
+                f"{format_number(float(row['asymmetric_ranks']), 11, 0)}"
+                f"{format_number(float(row['count_mismatch_edges']), 11, 0)}\n"
+            )
+
+        output.write(
+            "\nRaw detail (原始明细)：每次启用 --profile-comm-graph 的运行目录中，"
+            "communication_peers.csv 给出逐 rank 的 num_s、num_r、出/入邻居集合及逐邻居消息量；"
+            "communication_edges.csv 给出逐有向边的发送端/接收端计数核对；"
+            "rank_metrics.csv 给出逐 rank 标量；stages.csv 给出 P50/P95/P99/Max。\n"
+        )
+        if not any(
+            int(row["graph_capture_repetitions"]) > 0
+            for row in communication_summary_rows
+        ):
+            output.write(
+                "说明：本批次未启用通信图明细，因此邻居集合不对称和逐边一致性列为 N/A；"
+                "Alltoall、Waitall、邻居数和消息字节分位数仍可用。\n"
             )
 
     scaling_by_process = {int(row["processes"]): row for row in summary_rows}

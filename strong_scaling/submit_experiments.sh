@@ -70,7 +70,7 @@ if [[ "${SUITE_MODE}" == "1" ]]; then
     seen_modes=" "
     for mode in "${suite_modes_array[@]}"; do
         case "${mode}" in
-            core_cache|core_timing|full_io) ;;
+            core_cache|core_timing|full_io|comm_graph) ;;
             *)
                 echo "[ERROR] 不支持的 SUITE_MODES 项: ${mode}" >&2
                 exit 2
@@ -102,6 +102,7 @@ export MAXH="${MAXH:-1000.0}"
 export MINH="${MINH:-0.0}"
 export CORE_ONLY="${CORE_ONLY:-0}"
 export CACHE_COUNTERS="${CACHE_COUNTERS:-0}"
+export COMM_GRAPH="${COMM_GRAPH:-0}"
 export LAUNCHER_STYLE="${LAUNCHER_STYLE:-yhrun}"
 export LAUNCHER="${LAUNCHER:-${LAUNCHER_STYLE}}"
 export LAUNCHER_EXTRA_ARGS="${LAUNCHER_EXTRA_ARGS:---mpi=pmix}"
@@ -109,7 +110,7 @@ export EXTRA_APP_ARGS="${EXTRA_APP_ARGS:-}"
 export CPU_BIND="${CPU_BIND:-cores}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export LOAD_CLUSTER_ENV="${LOAD_CLUSTER_ENV:-1}"
-export SERIALIZE_JOBS START_INTERVAL_SECONDS SUITE_MODE SUITE_MODES PAGE_CACHE_POLICY PAGE_CACHE_STRICT
+export SERIALIZE_JOBS START_INTERVAL_SECONDS SUITE_MODE SUITE_MODES PAGE_CACHE_POLICY PAGE_CACHE_STRICT COMM_GRAPH
 
 {
     echo "Strong Scaling Submission Plan (强扩展提交计划)"
@@ -134,9 +135,11 @@ export SERIALIZE_JOBS START_INTERVAL_SECONDS SUITE_MODE SUITE_MODES PAGE_CACHE_P
     if [[ "${SUITE_MODE}" == "1" ]]; then
         echo "core_only=per-mode"
         echo "cache_counters=per-mode"
+        echo "communication_graph=per-mode"
     else
         echo "core_only=${CORE_ONLY}"
         echo "cache_counters=${CACHE_COUNTERS}"
+        echo "communication_graph=${COMM_GRAPH}"
     fi
     echo "suite_mode=${SUITE_MODE}"
     echo "suite_modes=${SUITE_MODES}"

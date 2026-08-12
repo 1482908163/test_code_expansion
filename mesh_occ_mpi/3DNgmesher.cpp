@@ -1118,7 +1118,14 @@ int com_sr_datatype(
 	if (num_s + num_r)
 	{
 		netgen_mpi_checkpoint(comm, "com_sr_datatype.waitall.begin", num_s, num_r);
+		const bool profile_waitall = scaling::Profiler::instance().enabled();
+		const double waitall_start = profile_waitall ? MPI_Wtime() : 0.0;
 		rc = MPI_Waitall(num_s + num_r, req, stat);
+		if (profile_waitall)
+		{
+			scaling::Profiler::instance().set_metric(
+				"vertex_waitall_seconds", MPI_Wtime() - waitall_start);
+		}
 		netgen_mpi_check(comm, rc, "com_sr_datatype/MPI_Waitall");
 		netgen_mpi_checkpoint(comm, "com_sr_datatype.waitall.end", num_s, num_r);
 	}
@@ -1217,7 +1224,14 @@ int com_sr_volumelement(
 	if (num_s + num_r)
 	{
 		netgen_mpi_checkpoint(comm, "com_sr_volumelement.waitall.begin", num_s, num_r);
+		const bool profile_waitall = scaling::Profiler::instance().enabled();
+		const double waitall_start = profile_waitall ? MPI_Wtime() : 0.0;
 		rc = MPI_Waitall(num_s + num_r, req, stat);
+		if (profile_waitall)
+		{
+			scaling::Profiler::instance().set_metric(
+				"volume_waitall_seconds", MPI_Wtime() - waitall_start);
+		}
 		netgen_mpi_check(comm, rc, "com_sr_volumelement/MPI_Waitall");
 		netgen_mpi_checkpoint(comm, "com_sr_volumelement.waitall.end", num_s, num_r);
 	}
@@ -1555,6 +1569,15 @@ int *com_barycoords(
 		"vertex_send_items", static_cast<double>(vertex_send_items));
 	scaling::Profiler::instance().set_metric(
 		"vertex_receive_items", static_cast<double>(vertex_receive_items));
+	scaling::Profiler::instance().set_metric(
+		"vertex_num_s", static_cast<double>(num_s));
+	scaling::Profiler::instance().set_metric(
+		"vertex_num_r", static_cast<double>(num_r));
+	scaling::Profiler::instance().record_peer_exchange(
+		"vertex_exchange",
+		num_s, dest, s_length,
+		num_r, src, r_length,
+		static_cast<std::uint64_t>(barycentric_type_bytes));
 	{
 		scaling::StageScope profile_stage("vertex_exchange_unpack", "compute");
 		for (i = 0; i < num_r; i++)
@@ -1803,6 +1826,15 @@ int *com_baryVolumeElements(
 		"volume_send_items", static_cast<double>(volume_send_items));
 	scaling::Profiler::instance().set_metric(
 		"volume_receive_items", static_cast<double>(volume_receive_items));
+	scaling::Profiler::instance().set_metric(
+		"volume_num_s", static_cast<double>(num_s));
+	scaling::Profiler::instance().set_metric(
+		"volume_num_r", static_cast<double>(num_r));
+	scaling::Profiler::instance().record_peer_exchange(
+		"volume_payload_exchange",
+		num_s, dest.data(), s_length.data(),
+		num_r, src.data(), r_length.data(),
+		static_cast<std::uint64_t>(volume_element_type_bytes));
 
 	int *newgid = nullptr;
 	{

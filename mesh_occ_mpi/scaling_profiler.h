@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "mpi.h"
 
@@ -12,6 +13,7 @@ namespace scaling {
 struct ProfileConfig {
     bool enabled = false;
     bool collect_hardware_cache = false;
+    bool collect_communication_graph = false;
     bool core_only = false;
     std::string output_root;
     std::string experiment = "strong_scaling";
@@ -60,6 +62,15 @@ public:
                            std::uint64_t send_bytes,
                            std::uint64_t receive_bytes);
 
+    void record_peer_exchange(const std::string &stage,
+                              int num_s,
+                              const int *destinations,
+                              const int *send_items,
+                              int num_r,
+                              const int *sources,
+                              const int *receive_items,
+                              std::uint64_t item_bytes);
+
     void set_total_elapsed(double seconds);
     void finalize();
 
@@ -88,6 +99,14 @@ private:
         std::uint64_t receive_bytes = 0;
     };
 
+    struct PeerExchangeLocal {
+        std::vector<int> destinations;
+        std::vector<int> sources;
+        std::vector<std::uint64_t> send_items;
+        std::vector<std::uint64_t> receive_items;
+        std::uint64_t item_bytes = 0;
+    };
+
     Profiler();
     ~Profiler();
 
@@ -111,6 +130,7 @@ private:
     std::unique_ptr<PerfCounterSet> perf_counters_;
     std::map<std::string, StageLocalStats> stages_;
     std::map<std::string, std::string> stage_categories_;
+    std::map<std::string, PeerExchangeLocal> peer_exchanges_;
     std::map<std::string, double> metrics_;
     std::map<std::string, std::string> metadata_;
 };

@@ -38,6 +38,7 @@ MAXH="${MAXH:-1000.0}"
 MINH="${MINH:-0.0}"
 CORE_ONLY="${CORE_ONLY:-1}"
 CACHE_COUNTERS="${CACHE_COUNTERS:-1}"
+COMM_GRAPH="${COMM_GRAPH:-0}"
 PAGE_CACHE_POLICY="${PAGE_CACHE_POLICY:-observe}"
 PAGE_CACHE_STRICT="${PAGE_CACHE_STRICT:-0}"
 LAUNCHER_EXTRA_ARGS="${LAUNCHER_EXTRA_ARGS:---mpi=pmix}"
@@ -71,8 +72,9 @@ if [[ ! "${PAGE_CACHE_POLICY}" =~ ^(observe|evict-first)$ ]]; then
     echo "[ERROR] PAGE_CACHE_POLICY 只能是 observe 或 evict-first。" >&2
     exit 2
 fi
-if [[ ! "${PAGE_CACHE_STRICT}" =~ ^[01]$ ]]; then
-    echo "[ERROR] PAGE_CACHE_STRICT 只能是 0 或 1。" >&2
+if [[ ! "${PAGE_CACHE_STRICT}" =~ ^[01]$ || ! "${CORE_ONLY}" =~ ^[01]$ ||
+      ! "${CACHE_COUNTERS}" =~ ^[01]$ || ! "${COMM_GRAPH}" =~ ^[01]$ ]]; then
+    echo "[ERROR] PAGE_CACHE_STRICT、CORE_ONLY、CACHE_COUNTERS 和 COMM_GRAPH 只能是 0 或 1。" >&2
     exit 2
 fi
 
@@ -163,6 +165,7 @@ environment_file="${RUN_ROOT}/environment/${job_tag}.txt"
     echo "omp_num_threads=${OMP_NUM_THREADS}"
     echo "core_only=${CORE_ONLY}"
     echo "cache_counters=${CACHE_COUNTERS}"
+    echo "communication_graph=${COMM_GRAPH}"
     echo "page_cache_policy=${PAGE_CACHE_POLICY}"
     echo "page_cache_strict=${PAGE_CACHE_STRICT}"
     echo "mesh_executable=${MESH_EXECUTABLE}"
@@ -219,6 +222,7 @@ if [[ ! -e "${RUN_ROOT}/run_plan.txt" ]]; then
         echo "minh=${MINH}"
         echo "core_only=${CORE_ONLY}"
         echo "cache_counters=${CACHE_COUNTERS}"
+        echo "communication_graph=${COMM_GRAPH}"
         echo "page_cache_policy=${PAGE_CACHE_POLICY}"
         echo "repeat_roles=repeat_01:cold repeat_02..${REPEATS}:warm"
     } > "${plan_tmp}"
@@ -229,6 +233,7 @@ fi
 echo "============================================================"
 echo "Strong scaling (强扩展) run: ${RUN_NAME}"
 echo "Processes: ${PROCESS_COUNTS}; repeats: ${REPEATS}"
+echo "Communication graph (communication graph, 通信图明细): ${COMM_GRAPH}"
 echo "Page cache (页缓存): ${PAGE_CACHE_POLICY}; repeat 1=cold, repeat 2+=warm"
 echo "Result directory: ${RUN_ROOT}"
 echo "Environment: ${environment_file}"
@@ -303,6 +308,9 @@ for processes in ${PROCESS_COUNTS}; do
         fi
         if [[ "${CACHE_COUNTERS}" == "1" ]]; then
             application_command+=( --profile-cache )
+        fi
+        if [[ "${COMM_GRAPH}" == "1" ]]; then
+            application_command+=( --profile-comm-graph )
         fi
         application_command+=( "${app_extra[@]}" )
 

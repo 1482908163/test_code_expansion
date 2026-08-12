@@ -111,6 +111,8 @@ def main() -> None:
         core_mode = "core_timing"
     elif modes.get("core_cache"):
         core_mode = "core_cache"
+    elif modes.get("comm_graph"):
+        core_mode = "comm_graph"
     else:
         core_mode = "missing"
     core = modes.get(core_mode, {})

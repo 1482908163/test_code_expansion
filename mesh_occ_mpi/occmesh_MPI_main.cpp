@@ -35,6 +35,7 @@ void print_help() {
          "-adj : 通信" << endl <<
          "--profile : 开启强扩展指标采集" << endl <<
          "--profile-cache : 尝试采集硬件缓存访问/未命中计数" << endl <<
+         "--profile-comm-graph : 记录逐 rank 收发邻居集和逐边消息量" << endl <<
          "--profile-core-only : 跳过普通网格结果写出和质量评价，仅测试核心算法" << endl <<
          "--profile-dir <目录> : 分析结果根目录，默认 <输出目录>/strong_scaling_results" << endl <<
          "--profile-experiment <名称> : 实验名称" << endl <<
@@ -69,6 +70,7 @@ int main(int argc, char **argv) {
     double maxh = 1000.0,minh = 10.0;
     bool profile_enabled = false;
     bool profile_cache = false;
+    bool profile_comm_graph = false;
     bool profile_core_only = false;
     string profile_dir;
     string profile_experiment = "strong_scaling";
@@ -151,6 +153,10 @@ int main(int argc, char **argv) {
             profile_enabled = true;
             profile_cache = true;
         }
+        else if(!strcmp(argv[i],"--profile-comm-graph")) {
+            profile_enabled = true;
+            profile_comm_graph = true;
+        }
         else if(!strcmp(argv[i],"--profile-core-only")) {
             profile_enabled = true;
             profile_core_only = true;
@@ -194,6 +200,7 @@ int main(int argc, char **argv) {
     scaling::ProfileConfig profile_config;
     profile_config.enabled = profile_enabled;
     profile_config.collect_hardware_cache = profile_cache;
+    profile_config.collect_communication_graph = profile_comm_graph;
     profile_config.core_only = profile_core_only;
     profile_config.output_root = profile_dir;
     profile_config.experiment = profile_experiment;
@@ -215,7 +222,7 @@ int main(int argc, char **argv) {
     profiler.add_metadata("minh", std::to_string(minh));
     profiler.add_metadata("adjacency_enabled", isComputeAdj ? "true" : "false");
     profiler.add_metadata("save_vol", save_vol ? "true" : "false");
-    profiler.add_metadata("profiler_schema_version", "2");
+    profiler.add_metadata("profiler_schema_version", "3");
     profiler.add_metadata(
         "collective_timing",
         "pre_barrier_arrival_wait_then_aligned_collective_execution");
@@ -243,6 +250,7 @@ int main(int argc, char **argv) {
                     "实验名称 : " << profile_experiment << endl <<
                     "重复编号 : " << profile_repeat << endl <<
                     "仅核心算法 : " << (profile_core_only ? "是" : "否") << endl <<
+                    "通信图明细 : " << (profile_comm_graph ? "开启" : "关闭") << endl <<
                     "硬件缓存计数 : " << (profile_cache ? "请求" : "关闭") << endl;
         }
 
