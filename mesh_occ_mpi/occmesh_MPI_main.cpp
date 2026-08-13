@@ -709,7 +709,7 @@ int main(int argc, char **argv) {
                 //     continue;
                 // }
                 geoid = nglib::GetBoundaryID(mesh,j+1) +1;
-                if(nglib::ispatbound(mesh,j+1)){
+                if(nglib::ispatbound(mesh,j)){
                     continue;
                 }
                 i3.x[0] = newid[surfpointss[0]];

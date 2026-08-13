@@ -13,4 +13,23 @@ __pycache__/
 *.tmp
 .vscode/
 
-install-test/
+# General logs（普通日志）
+*.log
+
+# Strong-scaling large outputs（强扩展大体积数据）
+
+# 网格和应用输出，通常最大
+strong_scaling_results/**/application_output/
+
+# 每个进程规模的逐 rank 原始测量数据
+strong_scaling_results/**/p[0-9]*/
+
+# 启动器、调度器和页缓存日志
+strong_scaling_results/**/launcher_logs/
+strong_scaling_results/**/scheduler_logs/
+strong_scaling_results/**/page_cache_logs/
+strong_scaling_results/**/build_logs/
+
+# Slurm 标准输出和错误文件
+strong_scaling_results/**/*.out
+strong_scaling_results/**/*.err

@@ -176,7 +176,7 @@ void createElmerOutput(void *submesh,int *volumegid,int *pointgid,std::map<int, 
         //     continue;
         // }
         geoid = nglib::GetBoundaryID(mesh,j+1) +1;
-        if(nglib::ispatbound(mesh,j+1)){
+        if(nglib::ispatbound(mesh,j)){
             continue;
         }
         i3.x[0] = pointgid[surfpointss[0]];
