@@ -1456,6 +1456,11 @@ int *com_barycoords(
 		}
 	}
 	scaling::Profiler::instance().set_metric("shared_vertices", static_cast<double>(length));
+	// Every shared vertex has exactly one owner.  Summing this value across
+	// ranks therefore gives the global number of unique vertices, while summing
+	// local_points_before_adjacency gives the number of rank-local copies.
+	scaling::Profiler::instance().set_metric(
+		"owned_vertices_before_adjacency", static_cast<double>(newglobalnocounter));
 	scaling::Profiler::instance().set_metric(
 		"adjacent_processes", static_cast<double>(neighbor_pids.size()));
 	// compute pre - scan of all newglobalnocounter in array globoffsets

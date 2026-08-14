@@ -29,33 +29,36 @@
 
 运行环境以已验证的 `test_code_part03/cjz_nodsp_copy.sh` 为基准。`LD_LIBRARY_PATH` 会被设置为确定值，不会继承提交节点中的旧 MPI/PMIx 路径；尤其不得加入 `/vol8/home/hnu_lhz/cjz/aarch64-linux-gnu`，否则会混用该目录下的 `libpmix.so.2` 与 MPI-X 的 `libmpi.so.12`。计算作业会在启动 `yhrun` 前用 `ldd` 验证二者来源。
 
+### 1.1 “分区数”到底指什么
+
+这里有三个容易混淆、但含义完全不同的数量：
+
+| 名称 | 当前代码中的关系 | 含义 |
+|---|---:|---|
+| Slurm 分区 `PARTITION=mt_module` | 与网格分区无关 | 调度系统中的队列/资源池名称 |
+| 计算节点数 | `ceil(P / RANKS_PER_NODE)` | 这次作业实际申请的物理节点数 |
+| 网格分区数 `numParts` | **等于总 MPI 进程数 P** | METIS（图划分库）生成的计算子域数 |
+
+当前 `occmesh_MPI_main.cpp` 明确执行 `numParts = p`，其中 `p` 是 `MPI_COMM_WORLD` 的进程总数；随后 rank（进程）`id` 处理分区 `id`。因此当前实现是“一进程一网格分区”，不是“一节点一分区”。例如 `RANKS_PER_NODE=16` 时：
+
+| MPI 进程数 P | 节点数 | 网格分区数 |
+|---:|---:|---:|
+| 1024 | 64 | 1024 |
+| 2048 | 128 | 2048 |
+| 4096 | 256 | 4096 |
+| 8192 | 512 | 8192 |
+
+网格分区数目前不能通过脚本独立设置。若令 `numParts != P`，现有代码中“rank 编号就是分区编号”的假设会失效，需要新增 rank 与分区的映射，并支持一个 rank 处理多个分区或多个 rank 协作一个分区；这不是增加一个环境变量就能正确完成的改动。当前验证强扩展瓶颈不需要先做这种重构：保持每节点进程数不变，只改变 P，就能观察分区增多时边界、副本、负载和等待如何变化。
+
 ## 2. 编译插桩版本
 
 在登录节点执行：
 
 ```bash
-bash strong_scaling/build_profiled.sh
+bash build_project.sh
 ```
 
-该脚本不会删除已有 `build/`，会使用与 `build_project.sh` 相同的 MPI/GCC 12 环境进行 CMake 配置、增量编译和安装。日志统一写入：
-
-```text
-strong_scaling_results/build_logs/build_YYYYMMDD-HHMMSS.log
-```
-
-常用覆盖参数：
-
-```bash
-BUILD_JOBS=32 INSTALL_AFTER_BUILD=0 \
-  bash strong_scaling/build_profiled.sh
-```
-
-如果集群路径变化，只需覆盖环境变量，例如：
-
-```bash
-GCCHOME=/new/gcc-12 LOCAL_LIB=/new/local/lib \
-  bash strong_scaling/build_profiled.sh
-```
+这是仓库中现有的编译入口，会加载 MPI-X/GCC 12 环境，重新创建 `build/`，执行 CMake、编译并安装。因为本次修改包含 C++ 插桩，不重新编译就不会产生新增指标。集群路径变化时，应先在 `build_project.sh` 中同步修改 `PROJ_DIR`、`GCCHOME` 和 `LOCAL_LIB`。
 
 ## 3. 提交强扩展实验
 
@@ -147,6 +150,38 @@ EXPERIMENT=adjacency_comm_graph \
 SUITE_MODES="comm_graph" \
   bash strong_scaling/submit_experiments.sh
 ```
+
+### 3.4 验证负载不均衡与分区冗余的最小实验
+
+重新编译最新插桩后，只改变 MPI 进程数；输入模型、网格参数、每节点进程数和绑核方式必须固定：
+
+```bash
+PROCESS_COUNTS="1024 2048 4096 8192" \
+RANKS_PER_NODE=16 REPEATS=6 \
+LEVELS=3 REFINES=3 \
+START_INTERVAL_SECONDS=120 \
+EXPERIMENT=partition_redundancy_validation \
+SUITE_MODES="comm_graph" \
+  bash strong_scaling/submit_experiments.sh
+```
+
+各 P 是相互独立、可并行的 Slurm 作业；`START_INTERVAL_SECONDS=120` 只统一错开最早启动时间，不建立作业依赖。每个 P 的第 1 次是 cold（冷缓存）候选，第 2--6 次是 warm（热缓存）样本，最终使用 warm 中位数判断趋势。
+
+本次新增的逐 rank 指标会自动汇总到 `modes/comm_graph/analysis/`：
+
+| 输出 | 验证内容 |
+|---|---|
+| `decomposition_report.txt` | 首先阅读；把分区边界、副本倍数、负载不均衡和等待相关性放在一张表中 |
+| `decomposition_summary.csv` | 每个 P 对多次重复取中位数后的绘图数据 |
+| `decomposition_runs.csv` | 每次重复的数据，用于检查实验抖动 |
+| `communication_summary.csv` | 邻居数、消息量、Alltoall（全互换）和 Waitall（等待全部完成）的尾部时间 |
+
+两项假设按以下组合证据判断：
+
+1. 负载不均衡：`volume_imbalance_max_over_avg` 随 P 增大；同时 `volume_elements_vs_local_mesh_time_pearson > 0` 且 `volume_elements_vs_vertex_wait_pearson < 0`。这表示单元较多的 rank 计算更久，而单元较少、较早到达的 rank 等待更久。
+2. 分区冗余：`partition_boundary_faces`、`vertex_copy_factor` 或 `volume_copy_factor_after_adjacency` 随 P 增大，并伴随邻居数、消息量或通信时间上升。前者测量应用层副本，后者判断这些副本是否真正转化为通信代价。
+
+不要在同一条强扩展曲线内改变 `LEVELS`、`REFINES`、`MAXH`、`MINH` 或 `RANKS_PER_NODE`，否则问题规模或节点布局也会变化，无法把趋势归因于 P/分区数。若要进一步区分“节点数”与“MPI/网格分区数”的影响，可另做固定 P、只改变 `RANKS_PER_NODE` 的对照批次；它是第二阶段实验，不属于上述最小验证集。
 
 如果已经处于一个覆盖所需节点数的 allocation（资源分配）中，也可以直接运行单模式：
 

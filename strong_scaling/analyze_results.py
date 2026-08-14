@@ -19,6 +19,33 @@ from typing import Iterable
 
 IDENTITY_FIELDS = {"experiment", "processes", "repeat", "timestamp", "core_only"}
 
+DECOMPOSITION_VALUE_FIELDS = [
+    "partition_count",
+    "partitions_per_mpi_process",
+    "facemap_entries",
+    "physical_boundary_faces",
+    "partition_boundary_faces",
+    "partition_boundary_face_fraction_percent",
+    "local_points_before_total",
+    "unique_owned_vertices_total",
+    "shared_vertex_incidence_total",
+    "redundant_vertex_copies_total",
+    "vertex_copy_factor",
+    "ghost_points_added_total",
+    "point_growth_after_adjacency_percent",
+    "local_volume_elements_before_total",
+    "local_volume_elements_after_total",
+    "ghost_volume_elements_added_total",
+    "volume_copy_factor_after_adjacency",
+    "adjacent_processes_avg",
+    "adjacent_processes_max",
+    "volume_imbalance_max_over_avg",
+    "volume_elements_vs_local_mesh_time_pearson",
+    "volume_elements_vs_vertex_wait_pearson",
+    "local_mesh_time_vs_vertex_wait_pearson",
+    "vertex_count_wait_max_s",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="汇总强扩展实验结果")
@@ -133,6 +160,172 @@ def coefficient_of_variation(values: Iterable[float]) -> float:
     return 100.0 * statistics.stdev(usable) / mean if mean else 0.0
 
 
+def safe_ratio(numerator: float, denominator: float) -> float:
+    if not math.isfinite(numerator) or not math.isfinite(denominator) or denominator == 0.0:
+        return math.nan
+    return numerator / denominator
+
+
+def sum_field(rows: list[dict[str, str]], key: str) -> float:
+    values = finite(numeric(row, key) for row in rows)
+    return sum(values) if values else math.nan
+
+
+def max_field(rows: list[dict[str, str]], key: str) -> float:
+    values = finite(numeric(row, key) for row in rows)
+    return max(values) if values else math.nan
+
+
+def mean_field(rows: list[dict[str, str]], key: str) -> float:
+    values = finite(numeric(row, key) for row in rows)
+    return statistics.mean(values) if values else math.nan
+
+
+def pearson_correlation(xs: Iterable[float], ys: Iterable[float]) -> float:
+    pairs = [
+        (x, y)
+        for x, y in zip(xs, ys)
+        if math.isfinite(x) and math.isfinite(y)
+    ]
+    if len(pairs) < 2:
+        return math.nan
+    x_mean = statistics.mean(x for x, _ in pairs)
+    y_mean = statistics.mean(y for _, y in pairs)
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in pairs)
+    x_square_sum = sum((x - x_mean) ** 2 for x, _ in pairs)
+    y_square_sum = sum((y - y_mean) ** 2 for _, y in pairs)
+    denominator = math.sqrt(x_square_sum * y_square_sum)
+    return numerator / denominator if denominator else math.nan
+
+
+def read_decomposition_runs(
+    runs: list[dict[str, str]],
+) -> list[dict[str, float | int | str]]:
+    """Derive load-balance and rank-local copy metrics from profiler CSV files."""
+
+    results: list[dict[str, float | int | str]] = []
+    for run in runs:
+        run_dir = Path(run["source_file"]).parent
+        metrics_path = run_dir / "rank_metrics.csv"
+        stages_path = run_dir / "rank_stages.csv"
+        if not metrics_path.is_file() or not stages_path.is_file():
+            continue
+
+        with metrics_path.open(newline="", encoding="utf-8") as stream:
+            metric_rows = list(csv.DictReader(stream))
+        with stages_path.open(newline="", encoding="utf-8") as stream:
+            stage_rows = list(csv.DictReader(stream))
+        if not metric_rows:
+            continue
+
+        stage_times: dict[str, dict[int, float]] = defaultdict(dict)
+        for row in stage_rows:
+            try:
+                stage_times[row["stage"]][int(row["rank"])] = float(row["time_s"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        processes = int(run["processes"])
+        local_points_before = sum_field(metric_rows, "local_points_before_adjacency")
+        local_points_after = sum_field(metric_rows, "local_points_after_adjacency")
+        unique_owned_vertices = sum_field(metric_rows, "owned_vertices_before_adjacency")
+        shared_vertex_incidence = sum_field(metric_rows, "shared_vertices")
+        redundant_vertex_copies = (
+            max(0.0, local_points_before - unique_owned_vertices)
+            if math.isfinite(local_points_before)
+            and math.isfinite(unique_owned_vertices)
+            else math.nan
+        )
+        ghost_points = sum_field(metric_rows, "ghost_points_added")
+        if not math.isfinite(ghost_points):
+            ghost_points = max(0.0, local_points_after - local_points_before)
+
+        local_volume_before = sum_field(metric_rows, "local_volume_elements_before_adjacency")
+        local_volume_after = sum_field(metric_rows, "local_volume_elements_after_adjacency")
+        ghost_volume_elements = sum_field(metric_rows, "ghost_volume_elements_added")
+        if not math.isfinite(ghost_volume_elements):
+            ghost_volume_elements = max(0.0, local_volume_after - local_volume_before)
+
+        partition_count = max_field(metric_rows, "partition_count")
+        if not math.isfinite(partition_count):
+            # Backward compatibility: historical code also used numParts = MPI size.
+            partition_count = float(processes)
+        facemap_entries = max_field(metric_rows, "facemap_entries")
+        physical_boundary_faces = max_field(metric_rows, "physical_boundary_faces")
+        partition_boundary_faces = max_field(metric_rows, "partition_boundary_faces")
+
+        metric_by_rank: dict[int, dict[str, str]] = {}
+        for row in metric_rows:
+            try:
+                metric_by_rank[int(row["rank"])] = row
+            except (KeyError, TypeError, ValueError):
+                continue
+        ranks = sorted(metric_by_rank)
+        local_volume_counts = [
+            numeric(metric_by_rank[rank], "local_volume_elements_before_adjacency")
+            for rank in ranks
+        ]
+        local_volume_times = [
+            stage_times.get("local_volume_mesh", {}).get(rank, math.nan)
+            for rank in ranks
+        ]
+        vertex_wait_times = [
+            stage_times.get("vertex_count_pre_collective_wait", {}).get(rank, math.nan)
+            for rank in ranks
+        ]
+
+        results.append(
+            {
+                "experiment": run["experiment"],
+                "processes": processes,
+                "repeat": int(run["repeat"]),
+                "partition_count": partition_count,
+                "partitions_per_mpi_process": safe_ratio(partition_count, processes),
+                "facemap_entries": facemap_entries,
+                "physical_boundary_faces": physical_boundary_faces,
+                "partition_boundary_faces": partition_boundary_faces,
+                "partition_boundary_face_fraction_percent": 100.0
+                * safe_ratio(partition_boundary_faces, facemap_entries),
+                "local_points_before_total": local_points_before,
+                "unique_owned_vertices_total": unique_owned_vertices,
+                "shared_vertex_incidence_total": shared_vertex_incidence,
+                "redundant_vertex_copies_total": redundant_vertex_copies,
+                "vertex_copy_factor": safe_ratio(
+                    local_points_before, unique_owned_vertices
+                ),
+                "ghost_points_added_total": ghost_points,
+                "point_growth_after_adjacency_percent": 100.0
+                * safe_ratio(ghost_points, local_points_before),
+                "local_volume_elements_before_total": local_volume_before,
+                "local_volume_elements_after_total": local_volume_after,
+                "ghost_volume_elements_added_total": ghost_volume_elements,
+                "volume_copy_factor_after_adjacency": safe_ratio(
+                    local_volume_after, local_volume_before
+                ),
+                "adjacent_processes_avg": mean_field(metric_rows, "adjacent_processes"),
+                "adjacent_processes_max": max_field(metric_rows, "adjacent_processes"),
+                "volume_imbalance_max_over_avg": safe_ratio(
+                    max(local_volume_counts) if finite(local_volume_counts) else math.nan,
+                    statistics.mean(finite(local_volume_counts))
+                    if finite(local_volume_counts)
+                    else math.nan,
+                ),
+                "volume_elements_vs_local_mesh_time_pearson": pearson_correlation(
+                    local_volume_counts, local_volume_times
+                ),
+                "volume_elements_vs_vertex_wait_pearson": pearson_correlation(
+                    local_volume_counts, vertex_wait_times
+                ),
+                "local_mesh_time_vs_vertex_wait_pearson": pearson_correlation(
+                    local_volume_times, vertex_wait_times
+                ),
+                "vertex_count_wait_max_s": max(finite(vertex_wait_times), default=math.nan),
+                "source_file": str(metrics_path),
+            }
+        )
+    return results
+
+
 def format_number(value: float, width: int = 10, precision: int = 3) -> str:
     if not math.isfinite(value):
         return f"{'N/A':>{width}}"
@@ -192,6 +385,28 @@ def main() -> None:
         raise ValueError("Core-only and full-I/O runs must be analyzed separately")
     stage_runs = read_stage_runs(runs)
     graph_runs = read_graph_runs(runs)
+    decomposition_runs = read_decomposition_runs(runs)
+    decomposition_grouped: dict[int, list[dict[str, float | int | str]]] = defaultdict(list)
+    for row in decomposition_runs:
+        decomposition_grouped[int(row["processes"])].append(row)
+    decomposition_summary_rows: list[dict[str, float | int | str]] = []
+    for processes, rows in sorted(decomposition_grouped.items()):
+        warm_rows = [row for row in rows if int(row["repeat"]) > 1]
+        summary_source_rows = warm_rows or rows
+        decomposition_summary_rows.append(
+            {
+                "experiment": summary_source_rows[0]["experiment"],
+                "processes": processes,
+                "repetitions": len(summary_source_rows),
+                **{
+                    key: median_field(summary_source_rows, key)
+                    for key in DECOMPOSITION_VALUE_FIELDS
+                },
+            }
+        )
+    decomposition_summary_by_process = {
+        int(row["processes"]): row for row in decomposition_summary_rows
+    }
     grouped: dict[int, list[dict[str, str]]] = defaultdict(list)
     for row in runs:
         grouped[int(row["processes"])].append(row)
@@ -216,6 +431,10 @@ def main() -> None:
         }
         for key in numeric_fields:
             result[key] = median_field(rows, key)
+        decomposition = decomposition_summary_by_process.get(processes)
+        if decomposition is not None:
+            for key in DECOMPOSITION_VALUE_FIELDS:
+                result[key] = decomposition[key]
 
         cache_rows = [
             row
@@ -452,6 +671,19 @@ def main() -> None:
         "local_volume_elements_avg",
         "local_volume_elements_max",
         "volume_imbalance_max_over_avg",
+        "partition_count",
+        "partitions_per_mpi_process",
+        "partition_boundary_faces",
+        "partition_boundary_face_fraction_percent",
+        "vertex_copy_factor",
+        "ghost_points_added_total",
+        "volume_copy_factor_after_adjacency",
+        "adjacent_processes_avg",
+        "adjacent_processes_max",
+        "volume_elements_vs_local_mesh_time_pearson",
+        "volume_elements_vs_vertex_wait_pearson",
+        "local_mesh_time_vs_vertex_wait_pearson",
+        "vertex_count_wait_max_s",
         "setup_max_s",
         "compute_max_s",
         "postprocess_max_s",
@@ -492,6 +724,28 @@ def main() -> None:
         writer.writeheader()
         for row in summary_rows:
             writer.writerow({key: row.get(key, "") for key in summary_fields})
+
+    decomposition_run_fields = [
+        "experiment", "processes", "repeat", *DECOMPOSITION_VALUE_FIELDS, "source_file"
+    ]
+    with (output_dir / "decomposition_runs.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=decomposition_run_fields)
+        writer.writeheader()
+        for row in decomposition_runs:
+            writer.writerow({key: row.get(key, "") for key in decomposition_run_fields})
+
+    decomposition_summary_fields = [
+        "experiment", "processes", "repetitions", *DECOMPOSITION_VALUE_FIELDS
+    ]
+    with (output_dir / "decomposition_summary.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+        writer = csv.DictWriter(stream, fieldnames=decomposition_summary_fields)
+        writer.writeheader()
+        for row in decomposition_summary_rows:
+            writer.writerow({key: row.get(key, "") for key in decomposition_summary_fields})
 
     cold_warm_fields = list(cold_warm_rows[0].keys()) if cold_warm_rows else []
     with (output_dir / "cold_warm_summary.csv").open(
@@ -894,10 +1148,72 @@ def main() -> None:
         output.write("  collective_split_report.txt 集合通信拆分可读报告\n")
         output.write("  communication_summary.csv 通信图、消息量与尾部等待汇总\n")
         output.write("  communication_report.txt 通信诊断可读报告\n")
+        output.write("  decomposition_runs.csv  每次运行的分区、冗余副本与负载相关性\n")
+        output.write("  decomposition_summary.csv 各进程数的分区诊断中位数\n")
+        output.write("  decomposition_report.txt 分区冗余与负载不均衡可读报告\n")
         output.write("  all_runs.csv         所有重复实验的原始总指标\n")
         output.write("  cold_warm_summary.csv  冷/热页缓存分离汇总\n")
         output.write("  cold_warm_report.txt   冷/热页缓存可读报告\n")
         output.write("  scaling_report.txt   本文件\n")
+
+    with (output_dir / "decomposition_report.txt").open(
+        "w", encoding="utf-8"
+    ) as output:
+        output.write("Partition and Load Diagnostics (分区与负载诊断)\n")
+        output.write("=" * 176 + "\n")
+        output.write(
+            "当前实现固定采用 numParts = MPI_COMM_WORLD size：网格分区数等于 MPI 进程总数，"
+            "每个 rank 对应一个 METIS 分区；它不等于计算节点数，也不是独立实验参数。\n"
+        )
+        output.write(
+            "各 P 默认使用 repeat 2+ 的 warm（热缓存）样本中位数；若没有 warm 样本，"
+            "才退回使用当前可用重复。decomposition_runs.csv 仍保留全部重复。\n"
+        )
+        output.write(
+            "VertexCopy = 邻接交换前所有 rank 的局部点数之和 / 唯一归属点数；"
+            "VolumeCopy = 邻接交换后 / 交换前的体单元总数；Load M/A = rank 局部体单元最大值 / 平均值。\n"
+        )
+        output.write(
+            "相关系数 r(Load,Mesh) > 0 表示体单元较多的 rank 计算更久；"
+            "r(Load,Wait) < 0 表示体单元较少、较早到达的 rank 等待更久。两者同时出现才是"
+            "‘负载不均衡转化为同步等待’的直接证据。\n\n"
+        )
+        output.write(
+            f"{'P':>7} {'Runs':>5} {'Parts':>9} {'Part/P':>8} {'PartFace':>11} "
+            f"{'PartFace%':>10} {'VertexCopy':>11} {'GhostPts':>11} {'VolumeCopy':>11} "
+            f"{'GhostVol':>11} {'NbrAvg':>8} {'Load M/A':>9} {'r(Load,Mesh)':>13} "
+            f"{'r(Load,Wait)':>13} {'WaitMax(s)':>11}\n"
+        )
+        output.write("-" * 176 + "\n")
+        for row in decomposition_summary_rows:
+            output.write(
+                f"{int(row['processes']):>7}"
+                f"{int(row['repetitions']):>5}"
+                f"{format_number(float(row['partition_count']), 9, 0)}"
+                f"{format_number(float(row['partitions_per_mpi_process']), 8, 3)}"
+                f"{format_number(float(row['partition_boundary_faces']), 11, 0)}"
+                f"{format_number(float(row['partition_boundary_face_fraction_percent']), 10, 2)}"
+                f"{format_number(float(row['vertex_copy_factor']), 11, 4)}"
+                f"{format_number(float(row['ghost_points_added_total']), 11, 0)}"
+                f"{format_number(float(row['volume_copy_factor_after_adjacency']), 11, 4)}"
+                f"{format_number(float(row['ghost_volume_elements_added_total']), 11, 0)}"
+                f"{format_number(float(row['adjacent_processes_avg']), 8, 2)}"
+                f"{format_number(float(row['volume_imbalance_max_over_avg']), 9, 3)}"
+                f"{format_number(float(row['volume_elements_vs_local_mesh_time_pearson']), 13, 3)}"
+                f"{format_number(float(row['volume_elements_vs_vertex_wait_pearson']), 13, 3)}"
+                f"{format_number(float(row['vertex_count_wait_max_s']), 11, 6)}\n"
+            )
+        if not decomposition_summary_rows:
+            output.write(
+                "No rank_metrics.csv/rank_stages.csv data were found "
+                "(未发现逐 rank 的指标/阶段数据)。\n"
+            )
+        output.write(
+            "\n判据：随 P 增大，PartFace、VertexCopy 或 VolumeCopy 持续上升，支持"
+            "‘分区增多带来更多边界和应用层副本’；Load M/A 上升并同时出现正的"
+            " r(Load,Mesh) 与负的 r(Load,Wait)，支持‘负载不均衡导致同步等待’。"
+            "相关性只说明关联，最终还应结合等待时间和重复实验稳定性。\n"
+        )
 
     with (output_dir / "cold_warm_report.txt").open("w", encoding="utf-8") as output:
         output.write("Cold/Warm Page-cache Summary (冷/热页缓存汇总)\n")

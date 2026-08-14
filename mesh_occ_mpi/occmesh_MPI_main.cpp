@@ -440,6 +440,10 @@ int main(int argc, char **argv) {
         double time_part1_detail[6] = {0,0,0,0,0,0};
         //Set the number of partitions
         int numParts = p;
+        // Current algorithmic contract: one METIS partition is owned by one
+        // MPI rank.  Record it explicitly so experiment reports do not confuse
+        // Slurm nodes, MPI ranks, and mesh partitions.
+        profiler.set_metric("partition_count", static_cast<double>(numParts));
         FILE *fp;
         FILE *fp_time;
         //set the level of refinement
@@ -554,9 +558,12 @@ int main(int argc, char **argv) {
             netgen_mpi_checkpoint(MPI_COMM_WORLD, "Ng_SaveMesh.volfined.end");
         }
 
-        profiler.set_metric("local_points_before_adjacency", nglib::Ng_GetNP(submesh));
-        profiler.set_metric("local_surface_elements_before_adjacency", nglib::Ng_GetNSE(submesh));
-        profiler.set_metric("local_volume_elements_before_adjacency", nglib::Ng_GetNE(submesh));
+        const int local_points_before_adjacency = nglib::Ng_GetNP(submesh);
+        const int local_surface_elements_before_adjacency = nglib::Ng_GetNSE(submesh);
+        const int local_volume_elements_before_adjacency = nglib::Ng_GetNE(submesh);
+        profiler.set_metric("local_points_before_adjacency", local_points_before_adjacency);
+        profiler.set_metric("local_surface_elements_before_adjacency", local_surface_elements_before_adjacency);
+        profiler.set_metric("local_volume_elements_before_adjacency", local_volume_elements_before_adjacency);
 
 
         if (isComputeAdj) {
@@ -579,7 +586,7 @@ int main(int argc, char **argv) {
             int *newid = com_barycoords(submesh, MPI_COMM_WORLD, barycvrtx2adjprocsmap,
                                         baryc2locvrtxmap, adjbarycs, numParts, VEgid, id);
 
-            
+
             // int pointdebug = nglib::Ng_GetNP((nglib::Ng_Mesh *)submesh);
             // char *debugpath = new char[512];
             // sprintf(debugpath,"pointdebugpath%d.txt",id);
@@ -754,10 +761,23 @@ int main(int argc, char **argv) {
                 fflush(stdout);
             }
 
-            profiler.set_metric("local_points_after_adjacency", nglib::Ng_GetNP(submesh));
-            profiler.set_metric("local_surface_elements_after_adjacency", nglib::Ng_GetNSE(submesh));
-            profiler.set_metric("local_volume_elements_after_adjacency", nglib::Ng_GetNE(submesh));
-            
+            const int local_points_after_adjacency = nglib::Ng_GetNP(submesh);
+            const int local_surface_elements_after_adjacency = nglib::Ng_GetNSE(submesh);
+            const int local_volume_elements_after_adjacency = nglib::Ng_GetNE(submesh);
+            profiler.set_metric("local_points_after_adjacency", local_points_after_adjacency);
+            profiler.set_metric("local_surface_elements_after_adjacency", local_surface_elements_after_adjacency);
+            profiler.set_metric("local_volume_elements_after_adjacency", local_volume_elements_after_adjacency);
+            profiler.set_metric(
+                "ghost_points_added",
+                local_points_after_adjacency >= local_points_before_adjacency
+                    ? local_points_after_adjacency - local_points_before_adjacency
+                    : 0);
+            profiler.set_metric(
+                "ghost_volume_elements_added",
+                local_volume_elements_after_adjacency >= local_volume_elements_before_adjacency
+                    ? local_volume_elements_after_adjacency - local_volume_elements_before_adjacency
+                    : 0);
+
 
             savepvname = OUTPUT_PATH + "volwithadj/volwithadj" + str_id + ".vol";
             if(save_vol && !profiler.core_only()) {
@@ -782,6 +802,8 @@ int main(int argc, char **argv) {
             profiler.set_metric("local_points_after_adjacency", nglib::Ng_GetNP(submesh));
             profiler.set_metric("local_surface_elements_after_adjacency", nglib::Ng_GetNSE(submesh));
             profiler.set_metric("local_volume_elements_after_adjacency", nglib::Ng_GetNE(submesh));
+            profiler.set_metric("ghost_points_added", 0.0);
+            profiler.set_metric("ghost_volume_elements_added", 0.0);
         }
 
         double endTime = MPI_Wtime();
