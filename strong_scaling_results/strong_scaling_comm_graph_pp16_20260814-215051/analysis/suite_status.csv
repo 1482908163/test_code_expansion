@@ -1,0 +1,5 @@
+processes,mode,state,compute_exit_code,analysis_state,analysis_exit_code,result_available,valid_repetitions,expected_repetitions
+1024,comm_graph,COMPLETED,0,ANALYZED,0,1,6,6
+2048,comm_graph,COMPLETED,0,ANALYZED,0,1,6,6
+4096,comm_graph,COMPLETED,0,ANALYZED,0,1,6,6
+8192,comm_graph,COMPLETED,0,ANALYZED,0,1,6,6
