@@ -1,0 +1,18 @@
+Strong Scaling Run Plan (强扩展实验计划)
+========================================
+experiment=comm_graph
+batch_id=20260814-215051
+run_name=comm_graph
+result_directory=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_comm_graph_pp16_20260814-215051/modes/comm_graph
+process_counts=1024
+repeats=6
+ranks_per_node=16
+levels=3
+refines=3
+maxh=1000.0
+minh=0.0
+core_only=1
+cache_counters=0
+communication_graph=1
+page_cache_policy=evict-first
+repeat_roles=repeat_01:cold repeat_02..6:warm

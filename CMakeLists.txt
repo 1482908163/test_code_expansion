@@ -1,8 +1,13 @@
+cmake_minimum_required(VERSION 3.16)
+
 SET(CMAKE_C_COMPILER mpicc)
 SET(CMAKE_CXX_COMPILER mpicxx)
-PROJECT(HPDS_test)
+IF(NOT DEFINED CMAKE_INSTALL_PREFIX)
+    SET(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}/install-test"
+        CACHE PATH "Project-local installation directory")
+ENDIF()
 
-SET(CMAKE_INSTALL_PREFIX /vol8/home/hnu_lhz/cjz/NETGEN/install)
+PROJECT(HPDS_test)
 
 add_definitions("-g")
 add_definitions("-O3")
@@ -59,11 +64,9 @@ SET(METIS_INCLUDE_DIR    /vol8/home/hnu_lhz/cjz/NETGEN/install/include)
 # SET(MPI_LIBRARIES_DIR   /usr/lib/aarch64-linux-gnu/openmpi/lib/)
 # SET(MPI_INCLUDE_DIR     /usr/lib/aarch64-linux-gnu/openmpi/include/)
 
-LINK_LIBRARIES(${NG_LIBRARY_DIR} ${OCC_LIBRARY_DIR} ${METIS_LIBRARIES_DIR} ${MPI_LIBRARIES_DIR})
-LINK_DIRECTORIES(${NG_LIBRARY_DIR} ${OCC_LIBRARY_DIR} ${METIS_LIBRARIES_DIR} ${MPI_LIBRARIES_DIR})
+LINK_DIRECTORIES(${NG_LIBRARY_DIR} ${OCC_LIBRARIES_DIR} ${METIS_LIBRARIES_DIR} ${MPI_LIBRARIES_DIR})
 INCLUDE_DIRECTORIES(${NG_INCLUDE_DIR}  ${OpenCASCADE_INCLUDE_DIR} ${METIS_INCLUDE_DIR} ${MPI_INCLUDE_DIR})
 
 
 ADD_SUBDIRECTORY(mesh_occ_mpi )
 ADD_SUBDIRECTORY(merge_mesh )
-

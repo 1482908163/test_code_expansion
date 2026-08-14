@@ -1,0 +1,13 @@
+processes,mode,state,compute_exit_code,analysis_state,analysis_exit_code,result_available,valid_repetitions,expected_repetitions
+1024,core_timing,COMPLETED,0,ANALYZED,0,1,6,6
+1024,core_cache,COMPLETED,0,ANALYZED,0,1,6,6
+1024,full_io,COMPLETED,0,ANALYZED,0,1,6,6
+2048,core_timing,COMPLETED,0,ANALYZED,0,1,6,6
+2048,core_cache,COMPLETED,0,ANALYZED,0,1,6,6
+2048,full_io,COMPLETED,0,ANALYZED,0,1,6,6
+4096,core_timing,COMPLETED,0,ANALYZED,0,1,6,6
+4096,core_cache,COMPLETED,0,ANALYZED,0,1,6,6
+4096,full_io,COMPLETED,0,ANALYZED,0,1,6,6
+8192,core_timing,COMPLETED,0,ANALYZED,0,1,6,6
+8192,core_cache,COMPLETED,0,ANALYZED,0,1,6,6
+8192,full_io,COMPLETED,0,ANALYZED,0,1,6,6

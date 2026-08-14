@@ -2,7 +2,11 @@
 #include <algorithm>
 #include <math.h>
 #include <iostream>
+#include <vector>
+#include <limits>
 #include "3DNgmesher.h"
+#include "scaling_profiler.h"
+#include "mpi_debug.h"
 #include <string>
 #include <time.h>
 
@@ -171,7 +175,7 @@ void ExtractPartitionSurfaceMesh(void *mesh, idx_t *edest, std::map<int, xdMeshF
 	int p, i, k, elemno;
 	int domainidx;
 	bool netgenmeshupdate = true;
-	
+
 	//获取当前进程的 MPI 通信相关信息，包括进程编号 id 和进程总数 size。
 	int id, size;
 	MPI_Comm_rank(MPI_COMM_WORLD, &id);
@@ -179,17 +183,22 @@ void ExtractPartitionSurfaceMesh(void *mesh, idx_t *edest, std::map<int, xdMeshF
 
 	//获取网格中的表面元素数量和体元素数量
 	double setup_start = MPI_Wtime();
-	int nse = nglib::Ng_GetNSE(newMesh);
-	int ne = nglib::Ng_GetNE(newMesh);
+	int nse = 0;
+	int ne = 0;
 	surfMap_t surfMap;
-	GetSurfPoints(newMesh, surfMap);
+	{
+		scaling::StageScope profile_stage("face_map_setup", "compute");
+		nse = nglib::Ng_GetNSE(newMesh);
+		ne = nglib::Ng_GetNE(newMesh);
+		GetSurfPoints(newMesh, surfMap);
+	}
 	time_t start_time,time1,time2,time3,time4;
 	if(id == 0) {
 		start_time = time(NULL);
 	}
 	//每个进程计算了划分后负责处理的元素数量。
-	int every_sub_ne[size];
-	int every_offset[size];
+	std::vector<int> every_sub_ne(size, 0);
+	std::vector<int> every_offset(size, 0);
 	int sub_ne = ne / size;
 	for(int i = 0; i < size; i++) {
 		every_sub_ne[i] = sub_ne*4;
@@ -204,7 +213,8 @@ void ExtractPartitionSurfaceMesh(void *mesh, idx_t *edest, std::map<int, xdMeshF
 
 	// std::vector<fid_xdMeshFaceInfo> sub_face_map;
 	sub_ne = end_ne-start_ne+1;
-	fid_xdMeshFaceInfo sub_face_map[sub_ne*4];
+	std::vector<fid_xdMeshFaceInfo> sub_face_map(
+		static_cast<std::size_t>(std::max(1, sub_ne * 4)));
 	int sub_face_map_index = 0;
 
 	double setup_end = MPI_Wtime();
@@ -212,36 +222,40 @@ void ExtractPartitionSurfaceMesh(void *mesh, idx_t *edest, std::map<int, xdMeshF
 
 	//函数根据每个进程负责的元素范围，遍历划分后的网格的元素
 	double local_extract_start = MPI_Wtime();
-	for (elemno = start_ne; elemno <= end_ne; elemno++)
 	{
-		p = edest[elemno - 1];
+		scaling::StageScope profile_stage("face_local_extract", "compute");
+		for (elemno = start_ne; elemno <= end_ne; elemno++)
+		{
+			p = edest[elemno - 1];
 		// the edest storage area decomposes after each body element belongs to the partition
 		// if (netgenmeshupdate) printf("MY: starting update\n")
 
 		//获取其面的索引
-		nglib::My_Ng_GetElement_Faces(newMesh, elemno, fids, orient, netgenmeshupdate);
+			nglib::My_Ng_GetElement_Faces(newMesh, elemno, fids, orient, netgenmeshupdate);
 		// get the four surface indexes for each body elemetn
 
 		//获取顶点的索引
-		netgenmeshupdate = false;
-		nglib::Ng_GetVolumeElement(newMesh, elemno, vrts, domainidx);
+			netgenmeshupdate = false;
+			nglib::Ng_GetVolumeElement(newMesh, elemno, vrts, domainidx);
 
 
 		// get the four vertex indexes for each body element
-		for (k = 0; k < 4; k++)
-		{
+			for (k = 0; k < 4; k++)
+			{
 			//调用ExtractSurfaceMesh函数提取表面网格，将面信息存储在sub_face_map中
-			ExtractSurfaceMesh(newMesh, fids[k], p, vrts, sub_face_map, sub_face_map_index, domainidx);
-			sub_face_map_index++;
-		}
+				ExtractSurfaceMesh(newMesh, fids[k], p, vrts, sub_face_map.data(), sub_face_map_index, domainidx);
+				sub_face_map_index++;
+			}
 
+		}
 	}
 	double local_extract_end = MPI_Wtime();
 	if (stage_time) stage_time[1] = local_extract_end - local_extract_start;
 
 	//使用Allgather_Face_Map函数收集所有进程的结果，得到最终的表面网格
 	double allgather_stage_time[3] = {0.0, 0.0, 0.0};
-	Allgather_Face_Map(facemap,sub_face_map,ne,sub_ne,every_sub_ne,every_offset, allgather_stage_time);
+	Allgather_Face_Map(facemap, sub_face_map.data(), ne, sub_ne,
+						every_sub_ne.data(), every_offset.data(), allgather_stage_time);
 	if (stage_time) {
 		stage_time[2] = allgather_stage_time[0];
 		stage_time[3] = allgather_stage_time[1];
@@ -415,6 +429,13 @@ void fid_xdMeshFaceInfo::build_MPIType() {
 //  -param : sub_face_map 输入的子网格
 
 
+static void ProfileCollectiveArrivalWait(const char *stage, MPI_Comm comm)
+{
+	if (!scaling::Profiler::instance().enabled()) return;
+	scaling::StageScope profile_stage(stage, "synchronization");
+	MPI_Barrier(comm);
+}
+
 void Allgather_Face_Map(std::map<int, xdMeshFaceInfo> &facemap, fid_xdMeshFaceInfo *sub_face_map, int ne, int sub_ne, int *every_sub_ne, int *every_offset, double *stage_time) {
 	if (stage_time) {
 		for (int i = 0; i < 3; i++) stage_time[i] = 0.0;
@@ -424,45 +445,60 @@ void Allgather_Face_Map(std::map<int, xdMeshFaceInfo> &facemap, fid_xdMeshFaceIn
 	int rank;
 	//获取当前进程的MPI等级
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	//进行数据的同步
-	MPI_Barrier(MPI_COMM_WORLD);
-	//创建自定义的MPI数据类型
-	fid_xdMeshFaceInfo::build_MPIType();
-	// fid_xdMeshFaceInfo *sub_face_maps = new fid_xdMeshFaceInfo[ne*4];
-	//分配内存空间，创建用于存储合并后面映射数据的数组
-	fid_xdMeshFaceInfo *sub_face_maps = (fid_xdMeshFaceInfo*)malloc(sizeof(fid_xdMeshFaceInfo) *(ne)*4);
+	fid_xdMeshFaceInfo *sub_face_maps = nullptr;
+	{
+		scaling::StageScope profile_stage("face_collective_setup", "compute");
+		//创建自定义的MPI数据类型
+		fid_xdMeshFaceInfo::build_MPIType();
+		//分配内存空间，创建用于存储合并后面映射数据的数组
+		sub_face_maps = (fid_xdMeshFaceInfo*)malloc(sizeof(fid_xdMeshFaceInfo) *(ne)*4);
+	}
+	// 在所有本地准备完成后对齐，避免把本地分配时间计入集合通信执行。
+	ProfileCollectiveArrivalWait("face_pre_collective_wait", MPI_COMM_WORLD);
 	double before_allgather = MPI_Wtime();
 	if (stage_time) stage_time[0] = before_allgather - gather_start;
 
-	
+
 	/*将每个核所求得的sub_face_map全合并*/
 	//将子进程的面映射数据进行全局合并
-	MPI_Allgatherv(&sub_face_map[0], sub_ne*4, fid_xdMeshFaceInfo::MPI_type,
-	 sub_face_maps, every_sub_ne, every_offset, fid_xdMeshFaceInfo::MPI_type,
-	 MPI_COMM_WORLD);
+	{
+		scaling::StageScope profile_stage("face_allgatherv", "communication");
+		MPI_Allgatherv(sub_face_map, sub_ne*4, fid_xdMeshFaceInfo::MPI_type,
+		 sub_face_maps, every_sub_ne, every_offset, fid_xdMeshFaceInfo::MPI_type,
+		 MPI_COMM_WORLD);
+	}
+	int face_record_bytes = 0;
+	MPI_Type_size(fid_xdMeshFaceInfo::MPI_type, &face_record_bytes);
+	scaling::Profiler::instance().add_communication(
+		"face_allgatherv", 1, 1,
+		static_cast<std::uint64_t>(sub_ne) * 4ULL * face_record_bytes,
+		static_cast<std::uint64_t>(ne) * 4ULL * face_record_bytes);
 	double after_allgather = MPI_Wtime();
 	if (stage_time) stage_time[1] = after_allgather - before_allgather;
 	//释放自定义的数据类型
 	MPI_Type_free(&fid_xdMeshFaceInfo::MPI_type);
 	//遍历合并后的面映射数据数组，根据面ID更新facemap
-	for(int i = 0; i < ne*4; i++) {
-		int cur_fid = sub_face_maps[i].fid;
-		auto it = facemap.find(cur_fid);
-		if(it == facemap.end()) {
-			facemap[cur_fid] = sub_face_maps[i].mfi;
-		} else if((it->second).procids[0] == sub_face_maps[i].mfi.procids[0]) {
-			facemap.erase(it);
-		} else {
-			(it->second).procids[1] = sub_face_maps[i].mfi.procids[0];
-			(it->second).svrtx[1][0] = sub_face_maps[i].mfi.svrtx[0][0];
+	{
+		scaling::StageScope profile_stage("face_global_merge", "compute");
+		for(int i = 0; i < ne*4; i++) {
+			int cur_fid = sub_face_maps[i].fid;
+			auto it = facemap.find(cur_fid);
+			if(it == facemap.end()) {
+				facemap[cur_fid] = sub_face_maps[i].mfi;
+			} else if((it->second).procids[0] == sub_face_maps[i].mfi.procids[0]) {
+				facemap.erase(it);
+			} else {
+				(it->second).procids[1] = sub_face_maps[i].mfi.procids[0];
+				(it->second).svrtx[1][0] = sub_face_maps[i].mfi.svrtx[0][0];
 			// if(!sub_face_maps[i].mfi.outw) {
-				(it->second).svrtx[1][1] = sub_face_maps[i].mfi.svrtx[0][1];
-				(it->second).svrtx[1][2] = sub_face_maps[i].mfi.svrtx[0][2];
+					(it->second).svrtx[1][1] = sub_face_maps[i].mfi.svrtx[0][1];
+					(it->second).svrtx[1][2] = sub_face_maps[i].mfi.svrtx[0][2];
 			// } else {
 			// 	(it->second).svrtx[1][1] = sub_face_maps[i].mfi.svrtx[0][2];
 			// 	(it->second).svrtx[1][2] = sub_face_maps[i].mfi.svrtx[0][1];
 			// }
-			(it->second).domainidx[1] = sub_face_maps[i].mfi.domainidx[0];
+				(it->second).domainidx[1] = sub_face_maps[i].mfi.domainidx[0];
+			}
 		}
 	}
 
@@ -570,12 +606,20 @@ void PartFaceCreate(void *mesh, int belongNumberPartition, std::map<int, xdMeshF
 	surfMap_t surfMap;
 	//获取原始网格中的表面点信息，将其存储在表面映射数据结构surfMap中。
 	GetSurfPoints(newMesh, surfMap);
+	std::uint64_t physical_boundary_faces = 0;
+	std::uint64_t partition_boundary_faces = 0;
+	scaling::Profiler::instance().set_metric("facemap_entries", static_cast<double>(facemap.size()));
 	// add vertices to the mesh
 	//遍历facemap中的每个面元素，处理属于当前分区的面元素。
 	for (itf = facemap.begin(); itf != facemap.end(); ++itf)
 	{
 		fid = itf->first;
 		finfo = itf->second;
+		if (finfo.procids[1] == -1) {
+			physical_boundary_faces++;
+		} else if (finfo.procids[0] != finfo.procids[1]) {
+			partition_boundary_faces++;
+		}
 		// insert face vertices into verts map
 		for (int j = 0; j < 2; j++)
 		{
@@ -601,6 +645,10 @@ void PartFaceCreate(void *mesh, int belongNumberPartition, std::map<int, xdMeshF
 			}
 		}
 	}
+	scaling::Profiler::instance().set_metric(
+		"physical_boundary_faces", static_cast<double>(physical_boundary_faces));
+	scaling::Profiler::instance().set_metric(
+		"partition_boundary_faces", static_cast<double>(partition_boundary_faces));
 	int Isbound;
 	// add face element to the grid
 	//再次处理属于当前分区的面元素。
@@ -770,7 +818,7 @@ Barycentric InitBarycv(int v, int maxbarycoord)
 
 //计算两个重心坐标（Barycentric）之间的中点
 void BarycMidPoint(Barycentric p1, Barycentric p2, Barycentric &res)
-{	
+{
 	//创建一个集合 s，用于存储两个重心坐标中非零坐标对应的顶点索引
 	std::set<int> s;
 	std::set<int>::iterator is;
@@ -1059,30 +1107,27 @@ int com_sr_datatype(
 	{
 		rc = MPI_Isend(s_data[i], s_length[i], datatype, dest[i], mypid, comm,
 					   &(req[i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_datatype/MPI_Isend");
 	}
 	for (i = 0; i < num_r; i++)
 	{
 		rc = MPI_Irecv(r_data[i], r_length[i], datatype, src[i], src[i], comm,
 					   &(req[num_s + i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_datatype/MPI_Irecv");
 	}
 	if (num_s + num_r)
 	{
+		netgen_mpi_checkpoint(comm, "com_sr_datatype.waitall.begin", num_s, num_r);
+		const bool profile_waitall = scaling::Profiler::instance().enabled();
+		const double waitall_start = profile_waitall ? MPI_Wtime() : 0.0;
 		rc = MPI_Waitall(num_s + num_r, req, stat);
-		if (rc != MPI_SUCCESS)
+		if (profile_waitall)
 		{
-			printf("Error in mpi\n");
-			exit(1);
+			scaling::Profiler::instance().set_metric(
+				"vertex_waitall_seconds", MPI_Wtime() - waitall_start);
 		}
+		netgen_mpi_check(comm, rc, "com_sr_datatype/MPI_Waitall");
+		netgen_mpi_checkpoint(comm, "com_sr_datatype.waitall.end", num_s, num_r);
 	}
 	free(req);
 	free(stat);
@@ -1117,30 +1162,20 @@ int com_sr_int(
 	{
 		rc = MPI_Isend(s_data[i], 1, MPI_INT, dest[i], mypid, comm,
 					   &(req[i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_int/MPI_Isend");
 	}
 	for (i = 0; i < num_r; i++)
 	{
 		rc = MPI_Irecv(r_data[i], 1, MPI_INT, src[i], src[i], comm,
 					   &(req[num_s + i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_int/MPI_Irecv");
 	}
 	if (num_s + num_r)
 	{
+		netgen_mpi_checkpoint(comm, "com_sr_int.waitall.begin", num_s, num_r);
 		rc = MPI_Waitall(num_s + num_r, req, stat);
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_int/MPI_Waitall");
+		netgen_mpi_checkpoint(comm, "com_sr_int.waitall.end", num_s, num_r);
 	}
 	free(req);
 	free(stat);
@@ -1178,30 +1213,27 @@ int com_sr_volumelement(
 	{
 		rc = MPI_Isend(s_data[i], s_length[i], datatype, dest[i], mypid, comm,
 					   &(req[i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+		netgen_mpi_check(comm, rc, "com_sr_volumelement/MPI_Isend");
 	}
 	for (i = 0; i < num_r; i++)
 	{
 		rc = MPI_Irecv(r_data[i], r_length[i], datatype, src[i], src[i], comm,
-					   &(req[num_r + i]));
-		if (rc != MPI_SUCCESS)
-		{
-			printf("Error in mpi\n");
-			exit(1);
-		}
+					   &(req[num_s + i]));
+		netgen_mpi_check(comm, rc, "com_sr_volumelement/MPI_Irecv");
 	}
 	if (num_s + num_r)
 	{
+		netgen_mpi_checkpoint(comm, "com_sr_volumelement.waitall.begin", num_s, num_r);
+		const bool profile_waitall = scaling::Profiler::instance().enabled();
+		const double waitall_start = profile_waitall ? MPI_Wtime() : 0.0;
 		rc = MPI_Waitall(num_s + num_r, req, stat);
-		if (rc != MPI_SUCCESS)
+		if (profile_waitall)
 		{
-			printf("Error in mpi\n");
-			exit(1);
+			scaling::Profiler::instance().set_metric(
+				"volume_waitall_seconds", MPI_Wtime() - waitall_start);
 		}
+		netgen_mpi_check(comm, rc, "com_sr_volumelement/MPI_Waitall");
+		netgen_mpi_checkpoint(comm, "com_sr_volumelement.waitall.end", num_s, num_r);
 	}
 	free(req);
 	free(stat);
@@ -1322,6 +1354,7 @@ int *com_barycoords(
 	int newglobalVEocounter = 0;
 	int *newgid;
 	std::list<int> pids;
+	std::set<int> neighbor_pids;
 	// initialize new global ids array ��ʼ���µ�ȫ��id����
 	numverts = nglib::Ng_GetNP((nglib::Ng_Mesh *)submesh);
 	numNEs = nglib::Ng_GetNE((nglib::Ng_Mesh *)submesh);
@@ -1351,78 +1384,97 @@ int *com_barycoords(
 	newglobalnocounter = 0; // initialize global number counter��ʼ��ȫ �����ּ�����
 	// Loop goes over the geometric and partition boundary vertices in the new meshѭ���� ���������еļ��κͻ��ֱ߽綥��
 	int length = 0;
-	for (ib = baryc2locvrtxmap.begin(); ib != baryc2locvrtxmap.end(); ++ib)
 	{
-		brcy = ib->first;
-		locid = ib->second;
+		scaling::StageScope profile_stage("vertex_numbering_local", "compute");
+		for (ib = baryc2locvrtxmap.begin(); ib != baryc2locvrtxmap.end(); ++ib)
+		{
+			brcy = ib->first;
+			locid = ib->second;
 
 		// ���߽綥�������ȫ�ֶ�������.
-		bvrtx.gvrtx[0] = brcy.gvrtx[0];
-		bvrtx.gvrtx[1] = brcy.gvrtx[1];
-		bvrtx.gvrtx[2] = brcy.gvrtx[2];
-		ibc = barycvrtx2adjprocsmap.find(bvrtx);
-		if (ibc == barycvrtx2adjprocsmap.end())
-		{
-			continue;
-		}
-		length++;
-		pids = ibc->second;
-		adjbarycs[locid] = pids;
+			bvrtx.gvrtx[0] = brcy.gvrtx[0];
+			bvrtx.gvrtx[1] = brcy.gvrtx[1];
+			bvrtx.gvrtx[2] = brcy.gvrtx[2];
+			ibc = barycvrtx2adjprocsmap.find(bvrtx);
+			if (ibc == barycvrtx2adjprocsmap.end())
+			{
+				continue;
+			}
+			length++;
+			pids = ibc->second;
+			adjbarycs[locid] = pids;
 		// compute owners of shared vertices(held by multiple processors - called holders) ������ ��ļ���������(�ɶ������������ - -��Ϊ������)
-		holders.clear();
-		holders.push_back(mypid); // i am also a holder
-		for (li = (ibc->second).begin(); li != (ibc->second).end(); ++li)
-		{
-			holders.push_back((*li));
-		}
-
-		std::sort(holders.begin(), holders.end());
-		indxowner = (brcy.gvrtx[0] + brcy.gvrtx[1] + brcy.gvrtx[2] +
-					 brcy.coord[0] + brcy.coord[1] + brcy.coord[2]) %
-					(ibc->second).size();
-		ownerpid = holders[indxowner]; // if I am the owner, append it to the message to be sent �������������,���丽�ӵ�Ҫ���͵���Ϣ��
-		if (ownerpid == mypid)
-		{
-			newglobalnocounter++;
-			newgid[locid] = newglobalnocounter;
-			brcy.newgid = newglobalnocounter;
+			holders.clear();
+			holders.push_back(mypid); // i am also a holder
 			for (li = (ibc->second).begin(); li != (ibc->second).end(); ++li)
 			{
-				ipdt = pidmap.find((*li));
-				if (ipdt == pidmap.end())
-				{
-					pidmap[(*li)] = new BarycVector();
-				}
-				pidmap[(*li)]->push_back(brcy);
+				holders.push_back((*li));
+				neighbor_pids.insert(*li);
 			}
-		}
-		else
-		{ // i am not the owner of this partition boundary vertex �Ҳ�������ֿ�߽綥���������
-			newgid[locid] = -1;
-			srcit = srcmap.find(ownerpid);
-			if (srcit == srcmap.end())
+
+			std::sort(holders.begin(), holders.end());
+			indxowner = (brcy.gvrtx[0] + brcy.gvrtx[1] + brcy.gvrtx[2] +
+					 brcy.coord[0] + brcy.coord[1] + brcy.coord[2]) %
+					(ibc->second).size();
+			ownerpid = holders[indxowner]; // if I am the owner, append it to the message to be sent �������������,���丽�ӵ�Ҫ���͵���Ϣ��
+			if (ownerpid == mypid)
 			{
-				srcmap[ownerpid] = 1;
+				newglobalnocounter++;
+				newgid[locid] = newglobalnocounter;
+				brcy.newgid = newglobalnocounter;
+				for (li = (ibc->second).begin(); li != (ibc->second).end(); ++li)
+				{
+					ipdt = pidmap.find((*li));
+					if (ipdt == pidmap.end())
+					{
+						pidmap[(*li)] = new BarycVector();
+					}
+					pidmap[(*li)]->push_back(brcy);
+				}
 			}
 			else
+			{ // i am not the owner of this partition boundary vertex �Ҳ�������ֿ�߽綥���������
+				newgid[locid] = -1;
+				srcit = srcmap.find(ownerpid);
+				if (srcit == srcmap.end())
+				{
+					srcmap[ownerpid] = 1;
+				}
+				else
+				{
+					srcit->second = srcit->second + 1;
+				}
+			}
+		}
+		for (locid = 1; locid <= numverts; locid++)
+		{
+			if (newgid[locid] == 0)
 			{
-				srcit->second = srcit->second + 1;
+				newglobalnocounter++;
+				newgid[locid] = newglobalnocounter;
 			}
 		}
 	}
-	for (locid = 1; locid <= numverts; locid++)
-	{
-		if (newgid[locid] == 0)
-		{
-			newglobalnocounter++;
-			newgid[locid] = newglobalnocounter;
-		}
-	}
+	scaling::Profiler::instance().set_metric("shared_vertices", static_cast<double>(length));
+	// Every shared vertex has exactly one owner.  Summing this value across
+	// ranks therefore gives the global number of unique vertices, while summing
+	// local_points_before_adjacency gives the number of rank-local copies.
+	scaling::Profiler::instance().set_metric(
+		"owned_vertices_before_adjacency", static_cast<double>(newglobalnocounter));
+	scaling::Profiler::instance().set_metric(
+		"adjacent_processes", static_cast<double>(neighbor_pids.size()));
 	// compute pre - scan of all newglobalnocounter in array globoffsets
 	MYCALLOC(globoffsetsml, int *, (numprocs + 1), sizeof(int));
 	globoffsets = globoffsetsml + 1;
 	globoffsets[-1] = 0;
-	MPI_Allgather(&newglobalnocounter, 1, MPI_INT, globoffsets, 1, MPI_INT, comm);
+	ProfileCollectiveArrivalWait("vertex_count_pre_collective_wait", comm);
+	{
+		scaling::StageScope profile_stage("vertex_count_allgather", "communication");
+		MPI_Allgather(&newglobalnocounter, 1, MPI_INT, globoffsets, 1, MPI_INT, comm);
+	}
+	scaling::Profiler::instance().add_communication(
+		"vertex_count_allgather", 1, 1, sizeof(int),
+		static_cast<std::uint64_t>(numprocs) * sizeof(int));
 	for (i = 0; i < numprocs; i++)
 		globoffsets[i] += globoffsets[i - 1];
 	// add offsets to global numbers
@@ -1440,7 +1492,14 @@ int *com_barycoords(
 	MYCALLOC(globoffsetsmlVE, int *, (numprocs + 1), sizeof(int));
 	globoffsetsVE = globoffsetsmlVE + 1;
 	globoffsetsVE[-1] = 0;
-	MPI_Allgather(&numNEs, 1, MPI_INT, globoffsetsVE, 1, MPI_INT, comm);
+	ProfileCollectiveArrivalWait("element_count_pre_collective_wait", comm);
+	{
+		scaling::StageScope profile_stage("element_count_allgather", "communication");
+		MPI_Allgather(&numNEs, 1, MPI_INT, globoffsetsVE, 1, MPI_INT, comm);
+	}
+	scaling::Profiler::instance().add_communication(
+		"element_count_allgather", 1, 1, sizeof(int),
+		static_cast<std::uint64_t>(numprocs) * sizeof(int));
 	for (i = 0; i < numprocs; i++)
 		globoffsetsVE[i] += globoffsetsVE[i - 1];
 	// add offsets to global numbers
@@ -1450,83 +1509,111 @@ int *com_barycoords(
 		newgVEid[locVEid] += locVEid + globoffsetsVE[mypid - 1];
 	}
 	// new
-	num_s = pidmap.size();
-	if (num_s > 0)
+	std::uint64_t vertex_send_items = 0;
+	std::uint64_t vertex_receive_items = 0;
 	{
-		MYCALLOC(s_length, int *, num_s, sizeof(int));
-		MYCALLOC(dest, int *, num_s, sizeof(int));
-		MYCALLOC(s_data, Barycentric **, num_s, sizeof(Barycentric *));
-	}
-	else
-	{
-		dest = nullptr;
-		s_length = nullptr;
-		s_data = nullptr;
-	}
-	i = 0;
-	for (ipdt = pidmap.begin(); ipdt != pidmap.end(); ++ipdt)
-	{
-		s_length[i] = ipdt->second->size();
-		dest[i] = ipdt->first;
-		s_data[i] = &((*ipdt->second)[0]);
-		i++;
-	}
-	num_r = srcmap.size();
-	if (num_r > 0)
-	{
-		MYCALLOC(r_length, int *, num_r, sizeof(int));
-		MYCALLOC(src, int *, num_r, sizeof(int));
-		MYCALLOC(r_data, Barycentric **, num_r, sizeof(Barycentric *));
-	}
-	else
-	{
-		src = nullptr;
-		r_length = nullptr;
-		r_data = nullptr;
-	}
-	// compute lengths of messages (no. of items) that will be sent
-	// new
-	for (srcit = srcmap.begin(), i = 0; srcit != srcmap.end(); ++srcit, ++i)
-	{
-		src[i] = srcit->first;
-		r_length[i] = srcit->second;
-	}
-	// new
-	for (i = 0; i < num_r; i++)
-	{
-		MYCALLOC(r_data[i], Barycentric *, r_length[i], sizeof(Barycentric));
-	}
-	com_sr_datatype(comm, num_s, num_r, dest, src, s_length, r_length,
-					s_data, r_data, mpibaryctype, mypid);
-	for (i = 0; i < num_r; i++)
-	{
-		for (j = 0; j < r_length[i]; j++)
+		scaling::StageScope profile_stage("vertex_exchange_prepare", "compute");
+		num_s = pidmap.size();
+		if (num_s > 0)
 		{
-			locid = baryc2locvrtxmap[r_data[i][j]];
-			if (newgid[locid] != -1)
-				printf("%d> Error: remote global id %d\n", mypid, locid);
-			// newgid[locid] = -(r_ data[i][j]. newgid + globoffsets[src[i] - 1]);
-			newgid[locid] = (r_data[i][j].newgid + globoffsets[src[i] - 1]);
+			MYCALLOC(s_length, int *, num_s, sizeof(int));
+			MYCALLOC(dest, int *, num_s, sizeof(int));
+			MYCALLOC(s_data, Barycentric **, num_s, sizeof(Barycentric *));
+		}
+		else
+		{
+			dest = nullptr;
+			s_length = nullptr;
+			s_data = nullptr;
+		}
+		i = 0;
+		for (ipdt = pidmap.begin(); ipdt != pidmap.end(); ++ipdt)
+		{
+			s_length[i] = ipdt->second->size();
+			vertex_send_items += static_cast<std::uint64_t>(s_length[i]);
+			dest[i] = ipdt->first;
+			s_data[i] = &((*ipdt->second)[0]);
+			i++;
+		}
+		num_r = srcmap.size();
+		if (num_r > 0)
+		{
+			MYCALLOC(r_length, int *, num_r, sizeof(int));
+			MYCALLOC(src, int *, num_r, sizeof(int));
+			MYCALLOC(r_data, Barycentric **, num_r, sizeof(Barycentric *));
+		}
+		else
+		{
+			src = nullptr;
+			r_length = nullptr;
+			r_data = nullptr;
+		}
+		for (srcit = srcmap.begin(), i = 0; srcit != srcmap.end(); ++srcit, ++i)
+		{
+			src[i] = srcit->first;
+			r_length[i] = srcit->second;
+			vertex_receive_items += static_cast<std::uint64_t>(r_length[i]);
+		}
+		for (i = 0; i < num_r; i++)
+		{
+			MYCALLOC(r_data[i], Barycentric *, r_length[i], sizeof(Barycentric));
 		}
 	}
-	for (i = 0; i < num_r; i++)
+	int barycentric_type_bytes = 0;
+	MPI_Type_size(mpibaryctype, &barycentric_type_bytes);
 	{
-		free(r_data[i]);
+		scaling::StageScope profile_stage("vertex_exchange", "communication");
+		com_sr_datatype(comm, num_s, num_r, dest, src, s_length, r_length,
+						s_data, r_data, mpibaryctype, mypid);
 	}
-	if (num_s > 0)
+	scaling::Profiler::instance().add_communication(
+		"vertex_exchange", num_s, num_r,
+		vertex_send_items * static_cast<std::uint64_t>(barycentric_type_bytes),
+		vertex_receive_items * static_cast<std::uint64_t>(barycentric_type_bytes));
+	scaling::Profiler::instance().set_metric(
+		"vertex_send_items", static_cast<double>(vertex_send_items));
+	scaling::Profiler::instance().set_metric(
+		"vertex_receive_items", static_cast<double>(vertex_receive_items));
+	scaling::Profiler::instance().set_metric(
+		"vertex_num_s", static_cast<double>(num_s));
+	scaling::Profiler::instance().set_metric(
+		"vertex_num_r", static_cast<double>(num_r));
+	scaling::Profiler::instance().record_peer_exchange(
+		"vertex_exchange",
+		num_s, dest, s_length,
+		num_r, src, r_length,
+		static_cast<std::uint64_t>(barycentric_type_bytes));
 	{
-		free(s_length);
-		free(s_data);
-		free(dest);
+		scaling::StageScope profile_stage("vertex_exchange_unpack", "compute");
+		for (i = 0; i < num_r; i++)
+		{
+			for (j = 0; j < r_length[i]; j++)
+			{
+				locid = baryc2locvrtxmap[r_data[i][j]];
+				if (newgid[locid] != -1)
+					printf("%d> Error: remote global id %d\n", mypid, locid);
+				newgid[locid] = (r_data[i][j].newgid + globoffsets[src[i] - 1]);
+			}
+		}
+		for (i = 0; i < num_r; i++)
+		{
+			free(r_data[i]);
+		}
+		if (num_s > 0)
+		{
+			free(s_length);
+			free(s_data);
+			free(dest);
+		}
+		if (num_r > 0)
+		{
+			free(r_length);
+			free(r_data);
+			free(src);
+		}
+		free(globoffsetsml);
+		free(globoffsetsmlVE);
 	}
-	if (num_r > 0)
-	{
-		free(r_length);
-		free(r_data);
-		free(src);
-	}
-	free(globoffsetsml);
-	free(globoffsetsmlVE);
 	MPI_Type_free(&mpibaryctype);
 	return newgid;
 }
@@ -1544,85 +1631,63 @@ int *com_baryVolumeElements(
 	int mypid)
 {
 	nglib::Ng_Mesh *mesh = (nglib::Ng_Mesh *)submesh;
-	int locid;
-	std::list<int> pids;
 	std::list<int>::iterator li;
 	std::map<int, std::list<int>>::iterator ib;
-	std::map<int, VEVector *> pidmap;
-	std::map<int, VEVector *>::iterator ipm; // ������ ��id���ڵ������嵥Ԫ
-	int num_keys = nglib::Ng_GetNE(mesh);
-	std::set<int> pid_tmp;	// �嵥Ԫ��Ӧ�Ľ���
-	std::set<int> vols_tmp; // �ᵥԪ����,��ʱ�����Ѿ�������ĵ�Ԫ,�����ظ�����
+	std::map<int, VEVector> pidmap;
+	const int num_keys = nglib::Ng_GetNE(mesh);
+	std::set<int> pid_tmp;
 	std::set<int>::iterator pt;
-	int i;
 	int domainidx;
 	double xyz[3];
 	xdVElement ve;
-	// construct MPI Datatype MPI���� ��������
-	int count = 4;
-	int blocklens[4];
+
+	int blocklens[4] = {4, 12, 1, 1};
 	MPI_Aint addrs[4];
-	MPI_Datatype mpitypes[4];
+	MPI_Datatype mpitypes[4] = {MPI_INT, MPI_DOUBLE, MPI_INT, MPI_INT};
 	MPI_Datatype mpivetype;
-	blocklens[0] = 4;
-	blocklens[1] = 12;
-	blocklens[2] = 1;
-	blocklens[3] = 1;
-	mpitypes[0] = MPI_INT;
-	mpitypes[1] = MPI_DOUBLE;
-	mpitypes[2] = MPI_INT;
-	mpitypes[3] = MPI_INT;
-	//MPI_Address(&ve.Pindex, addrs);
-	//MPI_Address(&ve.Vertexs, addrs + 1);
-	//MPI_Address(&ve.gid, addrs + 2);
-	//MPI_Address(&ve.domidx, addrs + 3);
+	MPI_Get_address(&ve.Pindex, addrs);
+	MPI_Get_address(&ve.Vertexs, addrs + 1);
+	MPI_Get_address(&ve.gid, addrs + 2);
+	MPI_Get_address(&ve.domidx, addrs + 3);
+	addrs[3] -= addrs[0];
+	addrs[2] -= addrs[0];
+	addrs[1] -= addrs[0];
+	addrs[0] = 0;
+	netgen_mpi_check(
+		comm,
+		MPI_Type_create_struct(4, blocklens, addrs, mpitypes, &mpivetype),
+		"com_baryVolumeElements/MPI_Type_create_struct");
+	netgen_mpi_check(
+		comm, MPI_Type_commit(&mpivetype),
+		"com_baryVolumeElements/MPI_Type_commit");
 
-    MPI_Get_address(&ve.Pindex, addrs);
-    MPI_Get_address(&ve.Vertexs, addrs + 1);
-    MPI_Get_address(&ve.gid, addrs + 2);
-    MPI_Get_address(&ve.domidx, addrs + 3);
-	addrs[3] = addrs[3] - addrs[0];
-	addrs[2] = addrs[2] - addrs[0];
-	addrs[1] = addrs[1] - addrs[0];
-	addrs[0] = (MPI_Aint)0;
-	//MPI_Type_struct(count, blocklens, addrs, mpitypes, &mpivetype);
-	MPI_Type_create_struct(count, blocklens, addrs, mpitypes, &mpivetype);
-	MPI_Type_commit(&mpivetype);
 	int entity[4];
-	int *vols;
-	int volsize;
-
-	for (i = 0; i < num_keys; i++)
 	{
-		nglib::Ng_GetVolumeElement(mesh, i + 1, entity, domainidx);
-		pid_tmp.clear();
-		std::map<int, int> num_adjPoints;
-		std::map<int, int>::iterator igap;
-		num_adjPoints.clear();
-		
-		for (int k = 0; k < 4; k++)
+		scaling::StageScope profile_stage("volume_exchange_pack", "compute");
+		for (int i = 0; i < num_keys; ++i)
 		{
-			ib = adjbarycs.find(entity[k]);
-			if (ib != adjbarycs.end())
+			nglib::Ng_GetVolumeElement(mesh, i + 1, entity, domainidx);
+			pid_tmp.clear();
+			std::map<int, int> num_adjPoints;
+
+			for (int k = 0; k < 4; ++k)
 			{
-				for (li = (ib->second).begin(); li != (ib->second).end(); ++li)
-				{
+				ib = adjbarycs.find(entity[k]);
+				if (ib == adjbarycs.end())
+					continue;
+				for (li = ib->second.begin(); li != ib->second.end(); ++li)
 					num_adjPoints[*li]++;
-				}
 			}
-		}
 
-		for (igap = num_adjPoints.begin(); igap != num_adjPoints.end(); ++igap)
-		{
-			if (igap->second >= 3)
+			for (const auto &entry : num_adjPoints)
 			{
-				pid_tmp.insert(igap->first);
+				if (entry.second >= 3)
+					pid_tmp.insert(entry.first);
 			}
-		}
-		if (pid_tmp.size())
-		{
+			if (pid_tmp.empty())
+				continue;
 
-			for (int k = 0; k < 4; k++)
+			for (int k = 0; k < 4; ++k)
 			{
 				nglib::Ng_GetPoint(mesh, entity[k], xyz);
 				ve.Vertexs[k].xyz[0] = xyz[0];
@@ -1633,168 +1698,215 @@ int *com_baryVolumeElements(
 			ve.domidx = domainidx;
 			ve.gid = VEgid[i + 1];
 			for (pt = pid_tmp.begin(); pt != pid_tmp.end(); ++pt)
-			{
-				ipm = pidmap.find((*pt));
-				if (ipm == pidmap.end())
-				{
-					pidmap[(*pt)] = new VEVector();
-				}
-				pidmap[(*pt)]->push_back(ve);
-			}
+				pidmap[*pt].push_back(ve);
 		}
 	}
 
-	int num_s, num_r; // number of sends and receives ���ͺͽ��յ�����
-	num_s = num_r = pidmap.size();
-	int *dest, *src;
-	int **s_data, **r_data, *size;
-	if (num_s > 0)
+	int comm_size = 0;
+	netgen_mpi_check(
+		comm, MPI_Comm_size(comm, &comm_size),
+		"com_baryVolumeElements/MPI_Comm_size");
+	if (comm_size != numprocs)
 	{
-		MYCALLOC(dest, int *, num_s, sizeof(int));
-		MYCALLOC(s_data, int **, num_s, sizeof(int *));
-		MYCALLOC(src, int *, num_s, sizeof(int));
-		MYCALLOC(r_data, int **, num_s, sizeof(int *));
-		MYCALLOC(size, int *, num_s, sizeof(int));
+		std::fprintf(
+			stderr,
+			"[MPI_ERROR] rank=%d communicator_size=%d numprocs=%d\n",
+			mypid, comm_size, numprocs);
+		std::fflush(stderr);
+		MPI_Abort(comm, MPI_ERR_OTHER);
+		std::abort();
 	}
-	else
+
+	std::vector<int> send_counts(comm_size, 0);
+	std::vector<int> recv_counts(comm_size, 0);
+	std::uint64_t volume_send_items = 0;
+	for (const auto &entry : pidmap)
 	{
-		dest = nullptr;
-		s_data = nullptr;
-		src = nullptr;
-		r_data = nullptr;
-		size = nullptr;
-	}
-	for (i = 0; i < num_r; i++)
-	{
-		MYCALLOC(r_data[i], int *, 1, sizeof(int));
-	}
-	i = 0;
-	for (ipm = pidmap.begin(); ipm != pidmap.end(); ++ipm)
-	{
-		dest[i] = ipm->first;
-		src[i] = ipm->first;
-		size[i] = ipm->second->size();
-		s_data[i] = &size[i];
-		// std::cout << "myid" << mypid << "dest:" << dest[i] << "size:" << size[i] << std::endl;
-		i++;
-	}
-	com_sr_int(comm, num_s, num_r, dest, src, s_data, r_data, mypid);
-	xdVElement **r_data_ves, **s_data_ves;
-	int *r_length, *s_length;
-	if (num_s > 0)
-	{
-		MYCALLOC(s_length, int *, num_s, sizeof(int));
-		MYCALLOC(s_data_ves, xdVElement **, num_s, sizeof(xdVElement *));
-		MYCALLOC(r_length, int *, num_r, sizeof(int));
-		MYCALLOC(r_data_ves, xdVElement **, num_r, sizeof(xdVElement *));
-	}
-	else
-	{
-		r_length = nullptr;
-		r_data_ves = nullptr;
-		s_length = nullptr;
-		s_data_ves = nullptr;
-	}
-	i = 0;
-	for (ipm = pidmap.begin(); ipm != pidmap.end(); ++ipm)
-	{
-		s_length[i] = *s_data[i];
-		r_length[i] = *r_data[i];
-		s_data_ves[i] = &((*ipm->second)[0]);
-		i++;
-	}
-	for (i = 0; i < num_r; i++)
-	{
-		MYCALLOC(r_data_ves[i], xdVElement *, r_length[i], sizeof(xdVElement));
-	}
-	// send/recv all the messages
-	com_sr_volumelement(comm, num_s, num_r, dest, src, s_length, r_length,
-						s_data_ves, r_data_ves, mpivetype, mypid);
-	int oldpointnum;
-	oldpointnum = nglib::Ng_GetNP(mesh);
-	std::map<int, int> gid2lid;
-	std::map<int, int>::iterator ig2l;
-	std::map<int, int> gids_add;
-	std::map<int, int>::iterator iga;
-	std::map<int, int> gidVEs_add;
-	std::map<int, int>::iterator igaVE;
-	int index = -1;
-	int pi[4];
-	for (i = 0; i < nglib::Ng_GetNP(mesh); i++)
-	{
-		gid2lid[oldgid[i]] = i;
-	}
-	int numVEcount, numVEold;
-	numVEcount = nglib::Ng_GetNE(mesh);
-	numVEold = nglib::Ng_GetNE(mesh);
-	for (i = 0; i < num_r; i++)
-	{
-		// std::cout << mypid << "-" << i << "-" << r_length[i] << std::endl;
-		for (int j = 0; j < r_length[i]; j++)
+		const int peer = entry.first;
+		const std::size_t element_count = entry.second.size();
+		if (peer < 0 || peer >= comm_size || peer == mypid ||
+			element_count > static_cast<std::size_t>(std::numeric_limits<int>::max()))
 		{
-			ve = r_data_ves[i][j];
+			std::fprintf(
+				stderr,
+				"[MPI_ERROR] rank=%d invalid_peer=%d element_count=%zu\n",
+				mypid, peer, element_count);
+			std::fflush(stderr);
+			MPI_Abort(comm, MPI_ERR_RANK);
+			std::abort();
+		}
+		send_counts[peer] = static_cast<int>(element_count);
+		volume_send_items += static_cast<std::uint64_t>(element_count);
+	}
 
-			for (int k = 0; k < 4; k++)
+	netgen_mpi_checkpoint(
+		comm, "com_baryVolumeElements.alltoall.begin",
+		static_cast<long>(pidmap.size()), comm_size);
+	ProfileCollectiveArrivalWait("volume_size_exchange_pre_collective_wait", comm);
+	{
+		scaling::StageScope profile_stage("volume_size_exchange", "communication");
+		netgen_mpi_check(
+			comm,
+			MPI_Alltoall(send_counts.data(), 1, MPI_INT,
+					 recv_counts.data(), 1, MPI_INT, comm),
+			"com_baryVolumeElements/MPI_Alltoall");
+	}
+	scaling::Profiler::instance().add_communication(
+		"volume_size_exchange",
+		static_cast<std::uint64_t>(comm_size),
+		static_cast<std::uint64_t>(comm_size),
+		static_cast<std::uint64_t>(comm_size) * sizeof(int),
+		static_cast<std::uint64_t>(comm_size) * sizeof(int));
+
+	std::vector<int> dest;
+	std::vector<int> src;
+	std::vector<int> s_length;
+	std::vector<int> r_length;
+	std::vector<xdVElement *> s_data_ves;
+	std::vector<xdVElement *> r_data_ves;
+	std::vector<std::vector<xdVElement>> recv_by_peer(comm_size);
+	std::uint64_t volume_receive_items = 0;
+	{
+		scaling::StageScope profile_stage("volume_payload_prepare", "compute");
+		dest.reserve(pidmap.size());
+		s_length.reserve(pidmap.size());
+		s_data_ves.reserve(pidmap.size());
+
+		for (int peer = 0; peer < comm_size; ++peer)
+		{
+			if (send_counts[peer] > 0)
 			{
-				ig2l = gid2lid.find(ve.Pindex[k]);
-				if (ig2l == gid2lid.end())
+				auto send_it = pidmap.find(peer);
+				if (send_it == pidmap.end() ||
+					static_cast<int>(send_it->second.size()) != send_counts[peer])
 				{
-					nglib::Ng_AddPoint(mesh, ve.Vertexs[k].xyz, index);
-					gids_add[index] = ve.Pindex[k];
-					gid2lid[ve.Pindex[k]] = index;
-					pi[k] = index;
+					std::fprintf(
+						stderr,
+						"[MPI_ERROR] rank=%d inconsistent send buffer for peer=%d\n",
+						mypid, peer);
+					std::fflush(stderr);
+					MPI_Abort(comm, MPI_ERR_COUNT);
+					std::abort();
 				}
-				else
-				{
-					pi[k] = ig2l->second;
-				}
+				dest.push_back(peer);
+				s_length.push_back(send_counts[peer]);
+				s_data_ves.push_back(send_it->second.data());
 			}
-			nglib::Ng_AddVolumeElement(mesh, nglib::NG_TET, pi, ve.domidx);
-			numVEcount++;
-			gidVEs_add[numVEcount] = ve.gid;
+
+			if (recv_counts[peer] > 0)
+			{
+				src.push_back(peer);
+				r_length.push_back(recv_counts[peer]);
+				recv_by_peer[peer].resize(static_cast<std::size_t>(recv_counts[peer]));
+				r_data_ves.push_back(recv_by_peer[peer].data());
+				volume_receive_items += static_cast<std::uint64_t>(recv_counts[peer]);
+			}
 		}
 	}
 
-	int *newgid;
-	MYCALLOC(newgid, int *, nglib::Ng_GetNP(mesh) + 1, sizeof(int));
-	for (i = 1; i < oldpointnum + 1; i++)
-		newgid[i] = oldgid[i];
-	for (iga = gids_add.begin(); iga != gids_add.end(); ++iga)
-		newgid[iga->first] = iga->second;
-	VEindex vei;
-	for (i = 1; i < numVEold + 1; i++)
+	const int num_s = static_cast<int>(dest.size());
+	const int num_r = static_cast<int>(src.size());
+	netgen_mpi_checkpoint(
+		comm, "com_baryVolumeElements.alltoall.end", num_s, num_r);
+	netgen_mpi_checkpoint(
+		comm, "com_baryVolumeElements.payload.begin", num_s, num_r);
+	int volume_element_type_bytes = 0;
+	netgen_mpi_check(
+		comm, MPI_Type_size(mpivetype, &volume_element_type_bytes),
+		"com_baryVolumeElements/MPI_Type_size");
 	{
-		vei.gid = VEgid[i];
+		scaling::StageScope profile_stage("volume_payload_exchange", "communication");
+		com_sr_volumelement(
+			comm, num_s, num_r,
+			dest.data(), src.data(), s_length.data(), r_length.data(),
+			s_data_ves.data(), r_data_ves.data(), mpivetype, mypid);
+	}
+	netgen_mpi_checkpoint(
+		comm, "com_baryVolumeElements.payload.end", num_s, num_r);
+	scaling::Profiler::instance().add_communication(
+		"volume_payload_exchange", num_s, num_r,
+		volume_send_items * static_cast<std::uint64_t>(volume_element_type_bytes),
+		volume_receive_items * static_cast<std::uint64_t>(volume_element_type_bytes));
+	scaling::Profiler::instance().set_metric(
+		"volume_send_items", static_cast<double>(volume_send_items));
+	scaling::Profiler::instance().set_metric(
+		"volume_receive_items", static_cast<double>(volume_receive_items));
+	scaling::Profiler::instance().set_metric(
+		"volume_num_s", static_cast<double>(num_s));
+	scaling::Profiler::instance().set_metric(
+		"volume_num_r", static_cast<double>(num_r));
+	scaling::Profiler::instance().record_peer_exchange(
+		"volume_payload_exchange",
+		num_s, dest.data(), s_length.data(),
+		num_r, src.data(), r_length.data(),
+		static_cast<std::uint64_t>(volume_element_type_bytes));
 
-		vei.Isin = 0;
-		VEindexs.push_back(vei);
-	}
-	for (igaVE = gidVEs_add.begin(); igaVE != gidVEs_add.end(); ++igaVE)
+	int *newgid = nullptr;
 	{
-		vei.gid = igaVE->second;
-		vei.Isin = 1;
-		VEindexs.push_back(vei);
-	}
-	for (i = 0; i < num_r; i++)
-	{
-		free(r_data[i]);
-		free(r_data_ves[i]);
-	}
-	if (num_s > 0)
-	{
-		free(dest);
-		free(src);
-		free(size);
-		free(r_length);
-		free(r_data_ves);
-		free(s_length);
-		free(s_data_ves);
+		scaling::StageScope profile_stage("volume_exchange_unpack", "compute");
+		const int oldpointnum = nglib::Ng_GetNP(mesh);
+		std::map<int, int> gid2lid;
+		std::map<int, int> gids_add;
+		std::map<int, int> gidVEs_add;
+		int index = -1;
+		int pi[4];
 
-		free(s_data);
-		free(r_data);
+		for (int i = 1; i <= nglib::Ng_GetNP(mesh); ++i)
+			gid2lid[oldgid[i]] = i;
+
+		int numVEcount = nglib::Ng_GetNE(mesh);
+		const int numVEold = nglib::Ng_GetNE(mesh);
+		for (int i = 0; i < num_r; ++i)
+		{
+			for (int j = 0; j < r_length[i]; ++j)
+			{
+				ve = r_data_ves[i][j];
+				for (int k = 0; k < 4; ++k)
+				{
+					auto point_it = gid2lid.find(ve.Pindex[k]);
+					if (point_it == gid2lid.end())
+					{
+						nglib::Ng_AddPoint(mesh, ve.Vertexs[k].xyz, index);
+						gids_add[index] = ve.Pindex[k];
+						gid2lid[ve.Pindex[k]] = index;
+						pi[k] = index;
+					}
+					else
+					{
+						pi[k] = point_it->second;
+					}
+				}
+				nglib::Ng_AddVolumeElement(mesh, nglib::NG_TET, pi, ve.domidx);
+				++numVEcount;
+				gidVEs_add[numVEcount] = ve.gid;
+			}
+		}
+
+		MYCALLOC(newgid, int *, nglib::Ng_GetNP(mesh) + 1, sizeof(int));
+		for (int i = 1; i <= oldpointnum; ++i)
+			newgid[i] = oldgid[i];
+		for (const auto &entry : gids_add)
+			newgid[entry.first] = entry.second;
+
+		VEindex vei;
+		for (int i = 1; i <= numVEold; ++i)
+		{
+			vei.gid = VEgid[i];
+			vei.Isin = 0;
+			VEindexs.push_back(vei);
+		}
+		for (const auto &entry : gidVEs_add)
+		{
+			vei.gid = entry.second;
+			vei.Isin = 1;
+			VEindexs.push_back(vei);
+		}
+		free(oldgid);
 	}
-	MPI_Type_free(&mpivetype);
-	free(oldgid);
+
+	netgen_mpi_check(
+		comm, MPI_Type_free(&mpivetype),
+		"com_baryVolumeElements/MPI_Type_free");
 	return newgid;
 }
 
@@ -1841,8 +1953,10 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 
 	int Aspect_Ratio_count[6] = {0, 0, 0, 0, 0, 0}; // 记录长宽比
 
-	for (int i = 0; i < nse; i++)
 	{
+		scaling::StageScope profile_stage("quality_surface_compute", "postprocess");
+		for (int i = 0; i < nse; i++)
+		{
 		nglib::Ng_GetSurfaceElement(newMesh, i + 1, surfpoints, surfidx);
 		for (int k = 0; k < 3; k++)
 		{ // Each face has three points
@@ -1867,28 +1981,45 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		TRIS_sum += TRIS;
 		TRIS_min = (std::min)(TRIS_min, TRIS);
 		TRIS_max = (std::max)(TRIS_max, TRIS);
+		}
 	}
-	int *Sum_Aspect_Ratio_count;
-	if(id == 0)
-		Sum_Aspect_Ratio_count = new int(6);
-	for(int i = 0; i < 6; i++)
-		MPI_Reduce(&Aspect_Ratio_count[i],&Sum_Aspect_Ratio_count[i], 1 , MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-	if(id == 0)
+	int Sum_Aspect_Ratio_count[6] = {0, 0, 0, 0, 0, 0};
+	netgen_mpi_checkpoint(
+		MPI_COMM_WORLD, "meshQuality.aspect_ratio.reduce.begin", 6, 0);
+	ProfileCollectiveArrivalWait(
+		"quality_reduce_pre_collective_wait", MPI_COMM_WORLD);
 	{
-		// printf("Sum_Aspect_Ratio_count : %d\n",Sum_Aspect_Ratio_count[0]);
+		scaling::StageScope profile_stage("quality_reduce", "communication");
+		netgen_mpi_check(
+			MPI_COMM_WORLD,
+			MPI_Reduce(
+				Aspect_Ratio_count, Sum_Aspect_Ratio_count,
+				6, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD),
+			"meshQualityEvaluation/MPI_Reduce");
+	}
+	netgen_mpi_checkpoint(
+		MPI_COMM_WORLD, "meshQuality.aspect_ratio.reduce.end", 6, 0);
+	if (id == 0)
+	{
+		scaling::StageScope profile_stage("quality_summary_io", "io");
 		std::string savename = OUTPUT_PATH + "meshQuality/meshQuality.txt";
 		FILE *fp = std::fopen(savename.c_str(), "w");
+		if (fp == nullptr)
+		{
+			std::fprintf(stderr, "[IO_ERROR] rank=0 cannot open %s\n", savename.c_str());
+			std::fflush(stderr);
+			MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+			std::abort();
+		}
 		int Sum_Count_Surface = 0;
-		for(int i = 0; i < 6; i++)
+		for (int i = 0; i < 6; ++i)
 			Sum_Count_Surface += Sum_Aspect_Ratio_count[i];
-		// for(int i = 0; i < 6; i++)
 		fprintf(fp, "Sum_Aspect_Ratio(1-1.5): %f \r\n", (float)Sum_Aspect_Ratio_count[0]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(1.5-2): %f \r\n", (float)Sum_Aspect_Ratio_count[1]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(2-3): %f \r\n", (float)Sum_Aspect_Ratio_count[2]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(3-4): %f \r\n", (float)Sum_Aspect_Ratio_count[3]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(4-5): %f \r\n", (float)Sum_Aspect_Ratio_count[4]/(float)Sum_Count_Surface);
 		fprintf(fp, "Sum_Aspect_Ratio(5-6): %f \r\n", (float)Sum_Aspect_Ratio_count[5]/(float)Sum_Count_Surface);
-		delete []Sum_Aspect_Ratio_count;
 		std::fclose(fp);
 	}
 	int volidx;
@@ -1911,8 +2042,10 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 	double VTRIS_sum = 0;
 	double VTRIS_max = 0;
 	double VTRIS_min = 0x3f3f3f;
-	for (int i = 0; i < ne; i++)
 	{
+		scaling::StageScope profile_stage("quality_volume_compute", "postprocess");
+		for (int i = 0; i < ne; i++)
+		{
 		nglib::Ng_GetVolumeElement(newMesh, i + 1, volpoints, volidx);
 		for (int k = 0; k < 4; k++)
 		{ // Each face has three points
@@ -1956,16 +2089,22 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		}
 		VMinIA = (std::min)({face_VMinIA[0], face_VMinIA[1], face_VMinIA[2], face_VMinIA[3]});
 		VMaxIA = (std::max)({face_VMaxIA[0], face_VMaxIA[1], face_VMaxIA[2], face_VMaxIA[3]});
+		}
 	}
 
-	std::string savename = OUTPUT_PATH + "meshQuality/meshQuality" + std::to_string(id) + ".txt";
-	FILE *fp = std::fopen(savename.c_str(), "w");
-	if (fp == NULL)
 	{
-		std::cout << "File " << savename.c_str() << "canot open" << std::endl;
-	}
-	else
-	{
+		scaling::StageScope profile_stage("quality_rank_io", "io");
+		std::string savename = OUTPUT_PATH + "meshQuality/meshQuality" + std::to_string(id) + ".txt";
+		FILE *fp = std::fopen(savename.c_str(), "w");
+		if (fp == NULL)
+		{
+			std::fprintf(stderr, "[IO_ERROR] rank=%d cannot open %s\n", id, savename.c_str());
+			std::fflush(stderr);
+			MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+			std::abort();
+		}
+		else
+		{
 
 		fprintf(fp, "Point_Num: %d SurfEle_Num: %d SoildEle_Num: %d \r\n", np, nse, ne);
 		fprintf(fp, "\r\n");
@@ -2000,8 +2139,11 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		fprintf(fp, "tetrahedrons_skew_mean: %f \r\n", VTRIS_sum / ne);
 		fprintf(fp, "tetrahedrons_internal_angle_min: %f \r\n", VMinIA);
 		fprintf(fp, "tetrahedrons_internal_angle_max: %f \r\n", VMaxIA);
+		}
+		if (fp != NULL) std::fclose(fp);
 	}
-	std::fclose(fp);
+	delete []surfpoints;
+	delete []volpoints;
 	return false;
 }
 

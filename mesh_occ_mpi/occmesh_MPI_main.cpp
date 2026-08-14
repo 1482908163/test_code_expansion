@@ -8,8 +8,12 @@
 #include "GProp_GProps.hxx"
 #include "BRepGProp.hxx"
 #include "3DNgmesher.h"
+#include "scaling_profiler.h"
+#include "mpi_debug.h"
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <cstdlib>
+#include <sstream>
 
 using namespace std;
 
@@ -29,6 +33,13 @@ void print_help() {
          "-minh : 网格最小值 默认为10.0" << endl <<
          "-v : 保存细化文件" << endl <<
          "-adj : 通信" << endl <<
+         "--profile : 开启强扩展指标采集" << endl <<
+         "--profile-cache : 尝试采集硬件缓存访问/未命中计数" << endl <<
+         "--profile-comm-graph : 记录逐 rank 收发邻居集和逐边消息量" << endl <<
+         "--profile-core-only : 跳过普通网格结果写出和质量评价，仅测试核心算法" << endl <<
+         "--profile-dir <目录> : 分析结果根目录，默认 <输出目录>/strong_scaling_results" << endl <<
+         "--profile-experiment <名称> : 实验名称" << endl <<
+         "--profile-repeat <编号> : 重复实验编号" << endl <<
          "-h --help : 参数输入帮助" << endl;
 }
 
@@ -57,6 +68,13 @@ int main(int argc, char **argv) {
     int numlevels = 0;
     int numrefine = 0;
     double maxh = 1000.0,minh = 10.0;
+    bool profile_enabled = false;
+    bool profile_cache = false;
+    bool profile_comm_graph = false;
+    bool profile_core_only = false;
+    string profile_dir;
+    string profile_experiment = "strong_scaling";
+    int profile_repeat = 1;
 //
 
     if(argc <= 1) {
@@ -128,7 +146,91 @@ int main(int argc, char **argv) {
             isComputeAdj = true;
 
         }
+        else if(!strcmp(argv[i],"--profile")) {
+            profile_enabled = true;
+        }
+        else if(!strcmp(argv[i],"--profile-cache")) {
+            profile_enabled = true;
+            profile_cache = true;
+        }
+        else if(!strcmp(argv[i],"--profile-comm-graph")) {
+            profile_enabled = true;
+            profile_comm_graph = true;
+        }
+        else if(!strcmp(argv[i],"--profile-core-only")) {
+            profile_enabled = true;
+            profile_core_only = true;
+        }
+        else if(!strcmp(argv[i],"--profile-dir")) {
+            profile_enabled = true;
+            if(i + 1 < argc) profile_dir = argv[++i];
+            else {
+                print_help();
+                MPI_Finalize();
+                return 1;
+            }
+        }
+        else if(!strcmp(argv[i],"--profile-experiment")) {
+            profile_enabled = true;
+            if(i + 1 < argc) profile_experiment = argv[++i];
+            else {
+                print_help();
+                MPI_Finalize();
+                return 1;
+            }
+        }
+        else if(!strcmp(argv[i],"--profile-repeat")) {
+            profile_enabled = true;
+            if(i + 1 < argc) profile_repeat = atoi(argv[++i]);
+            else {
+                print_help();
+                MPI_Finalize();
+                return 1;
+            }
+        }
     }
+
+    if (profile_repeat < 1) profile_repeat = 1;
+    if (profile_dir.empty()) {
+        profile_dir = OUTPUT_PATH;
+        if (!profile_dir.empty() && profile_dir.back() != '/') profile_dir += '/';
+        profile_dir += "strong_scaling_results";
+    }
+
+    scaling::ProfileConfig profile_config;
+    profile_config.enabled = profile_enabled;
+    profile_config.collect_hardware_cache = profile_cache;
+    profile_config.collect_communication_graph = profile_comm_graph;
+    profile_config.core_only = profile_core_only;
+    profile_config.output_root = profile_dir;
+    profile_config.experiment = profile_experiment;
+    profile_config.repeat = profile_repeat;
+    auto &profiler = scaling::Profiler::instance();
+    profiler.configure(MPI_COMM_WORLD, profile_config);
+
+    std::ostringstream command_line;
+    for (int argument = 0; argument < argc; ++argument) {
+        if (argument != 0) command_line << ' ';
+        command_line << argv[argument];
+    }
+    profiler.add_metadata("command", command_line.str());
+    profiler.add_metadata("input_path", INPUT_PATH);
+    profiler.add_metadata("output_path", OUTPUT_PATH);
+    profiler.add_metadata("numlevels", std::to_string(numlevels));
+    profiler.add_metadata("numrefine", std::to_string(numrefine));
+    profiler.add_metadata("maxh", std::to_string(maxh));
+    profiler.add_metadata("minh", std::to_string(minh));
+    profiler.add_metadata("adjacency_enabled", isComputeAdj ? "true" : "false");
+    profiler.add_metadata("save_vol", save_vol ? "true" : "false");
+    profiler.add_metadata("profiler_schema_version", "3");
+    profiler.add_metadata(
+        "collective_timing",
+        "pre_barrier_arrival_wait_then_aligned_collective_execution");
+    profiler.add_metadata(
+        "communication_fraction_definition",
+        "communication_execution_only; arrival_wait_reported_separately");
+    const char *omp_threads = std::getenv("OMP_NUM_THREADS");
+    profiler.add_metadata("omp_num_threads", omp_threads ? omp_threads : "unset");
 
     string savepvname = OUTPUT_PATH + "test_occ/test_occ.vol";
 
@@ -142,6 +244,15 @@ int main(int argc, char **argv) {
              "细化次数 : " << numrefine << endl <<
              "网格最大值:" << maxh << endl <<
              "网格最小值:" << minh << endl;
+        if (profile_enabled) {
+            cerr << "强扩展分析 : 开启" << endl <<
+                    "分析结果目录 : " << profile_dir << endl <<
+                    "实验名称 : " << profile_experiment << endl <<
+                    "重复编号 : " << profile_repeat << endl <<
+                    "仅核心算法 : " << (profile_core_only ? "是" : "否") << endl <<
+                    "通信图明细 : " << (profile_comm_graph ? "开启" : "关闭") << endl <<
+                    "硬件缓存计数 : " << (profile_cache ? "请求" : "关闭") << endl;
+        }
 
 
         // int ret = mkdir(OUTPUT_PATH.c_str(), 0777);
@@ -194,7 +305,10 @@ int main(int argc, char **argv) {
     double startTime = MPI_Wtime();
 
     string STEP_PATH = INPUT_PATH;
-    occ_geom = Ng_OCC_Load_STEP(STEP_PATH.c_str());
+    {
+        scaling::StageScope profile_stage("geometry_load", "io");
+        occ_geom = Ng_OCC_Load_STEP(STEP_PATH.c_str());
+    }
     if (!occ_geom)
     {
         cout << "Error reading in STEP File: " << STEP_PATH << endl;
@@ -222,14 +336,20 @@ int main(int argc, char **argv) {
         cout << "Setting Local Mesh size....." << endl;
         cout << "OCC Mesh Pointer before call = " << occ_mesh << endl;
     }
-    Ng_OCC_SetLocalMeshSize(occ_geom, occ_mesh, &mp);
+    {
+        scaling::StageScope profile_stage("coarse_local_size", "setup");
+        Ng_OCC_SetLocalMeshSize(occ_geom, occ_mesh, &mp);
+    }
     if(id == 0) {
         cout << "Local Mesh size successfully set....." << endl;
         cout << "OCC Mesh Pointer after call = " << occ_mesh << endl;
         cout << "Creating Edge Mesh....." << endl;
     }
 
-    ng_res = Ng_OCC_GenerateEdgeMesh(occ_geom, occ_mesh, &mp);
+    {
+        scaling::StageScope profile_stage("coarse_edge_mesh", "setup");
+        ng_res = Ng_OCC_GenerateEdgeMesh(occ_geom, occ_mesh, &mp);
+    }
     if (ng_res != NG_OK)
     {
         Ng_DeleteMesh(occ_mesh);
@@ -247,7 +367,10 @@ int main(int argc, char **argv) {
 
     id == 0 ? cout << "Creating Surface Mesh....." << endl: cout << "";
 
-    ng_res = Ng_OCC_GenerateSurfaceMesh(occ_geom, occ_mesh, &mp);
+    {
+        scaling::StageScope profile_stage("coarse_surface_mesh", "setup");
+        ng_res = Ng_OCC_GenerateSurfaceMesh(occ_geom, occ_mesh, &mp);
+    }
     if (ng_res != NG_OK)
     {
         Ng_DeleteMesh(occ_mesh);    //删除体网格
@@ -267,7 +390,10 @@ int main(int argc, char **argv) {
     if(id == 0)
         cout << "Creating Volume Mesh....." << endl;
 
-    ng_res = Ng_GenerateVolumeMesh(occ_mesh, &mp);
+    {
+        scaling::StageScope profile_stage("coarse_volume_mesh", "setup");
+        ng_res = Ng_GenerateVolumeMesh(occ_mesh, &mp);
+    }
 
     if(id == 0) {
 
@@ -286,8 +412,16 @@ int main(int argc, char **argv) {
 
     }
 
-    if(id == 0)
+    profiler.set_metric("coarse_points", Ng_GetNP(occ_mesh));
+    profiler.set_metric("coarse_surface_elements", Ng_GetNSE(occ_mesh));
+    profiler.set_metric("coarse_volume_elements", Ng_GetNE(occ_mesh));
+
+    if(id == 0 && !profiler.core_only()) {
+        scaling::StageScope profile_stage("coarse_mesh_save", "io");
+        netgen_mpi_checkpoint(MPI_COMM_WORLD, "Ng_SaveMesh.coarse.begin");
         Ng_SaveMesh(occ_mesh, savepvname.c_str());
+        netgen_mpi_checkpoint(MPI_COMM_WORLD, "Ng_SaveMesh.coarse.end");
+    }
 
 
     if(id == 0) cout << "Generate Coarse Mesh Done..." << endl;
@@ -306,6 +440,10 @@ int main(int argc, char **argv) {
         double time_part1_detail[6] = {0,0,0,0,0,0};
         //Set the number of partitions
         int numParts = p;
+        // Current algorithmic contract: one METIS partition is owned by one
+        // MPI rank.  Record it explicitly so experiment reports do not confuse
+        // Slurm nodes, MPI ranks, and mesh partitions.
+        profiler.set_metric("partition_count", static_cast<double>(numParts));
         FILE *fp;
         FILE *fp_time;
         //set the level of refinement
@@ -329,9 +467,16 @@ int main(int argc, char **argv) {
         std::string str_id = std::to_string(id);
 
         nglib::Ng_Mesh * submesh = nglib::Ng_NewMesh();
-        NewSubmesh(occ_mesh, submesh);
+        {
+            scaling::StageScope profile_stage("submesh_initialization", "setup");
+            NewSubmesh(occ_mesh, submesh);
+        }
 
-        idx_t *edest = PartitionMesh(occ_mesh, numParts);
+        idx_t *edest = nullptr;
+        {
+            scaling::StageScope profile_stage("metis_partition", "compute");
+            edest = PartitionMesh(occ_mesh, numParts);
+        }
 
         //MPI_Barrier(MPI_COMM_WORLD);
         double currtime0 = MPI_Wtime();
@@ -344,7 +489,10 @@ int main(int argc, char **argv) {
         time[1] = double(currtime1 - currtime0);
 
 
-        PartFaceCreate(occ_mesh, id, facemap, maxbarycoord, submesh, g2lvrtxmap, baryc2locvrtxmap, newfaces);
+        {
+            scaling::StageScope profile_stage("part_face_create", "compute");
+            PartFaceCreate(occ_mesh, id, facemap, maxbarycoord, submesh, g2lvrtxmap, baryc2locvrtxmap, newfaces);
+        }
         // savepvname = OUTPUT_PATH + "PartFaceCreate/PartFaceCreate" + str_id + ".vol";
         // if(save_vol) {
         // 	Ng_SaveMesh(submesh, savepvname.c_str());
@@ -354,15 +502,21 @@ int main(int argc, char **argv) {
         double currtime2 = MPI_Wtime();
         time[2] = double(currtime2 - currtime1);
 
-        Refine(submesh, numlevels, id, newfaces, baryc2locvrtxmap, edgemap);
+        {
+            scaling::StageScope profile_stage("surface_refine", "compute");
+            Refine(submesh, numlevels, id, newfaces, baryc2locvrtxmap, edgemap);
+        }
         //MPI_Barrier(MPI_COMM_WORLD);
         double currtime3 = MPI_Wtime();
         time[3] = double(currtime3 - currtime2);
 
 
         savepvname = OUTPUT_PATH + "refinedSurfmesh/refinedSurfmesh" + str_id + ".vol";
-        if(save_vol) {
+        if(save_vol && !profiler.core_only()) {
+            scaling::StageScope profile_stage("refined_surface_save", "io");
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "Ng_SaveMesh.refinedSurfmesh.begin");
             Ng_SaveMesh(submesh, savepvname.c_str());
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "Ng_SaveMesh.refinedSurfmesh.end");
         }
 
 
@@ -378,39 +532,61 @@ int main(int argc, char **argv) {
         nmp.fineness = 1;
 
         double volumeMesh_start = MPI_Wtime();
-        nglib::Ng_GenerateVolumeMesh(submesh, &nmp);
+        {
+            scaling::StageScope profile_stage("local_volume_mesh", "compute");
+            nglib::Ng_GenerateVolumeMesh(submesh, &nmp);
+        }
         double volumeMesh_end = MPI_Wtime();
         //MPI_Barrier(MPI_COMM_WORLD);
         if(id == 0) printf("meshing done \n");
         double currtime4 = MPI_Wtime();
         time[4] = double(currtime4 - currtime3);
 
-        for (i = 0; i < numrefine; i++) {
-            Refineforvol(submesh, id, newfaces, baryc2locvrtxmap, edgemap);
+        {
+            scaling::StageScope profile_stage("volume_refine", "compute");
+            for (i = 0; i < numrefine; i++) {
+                Refineforvol(submesh, id, newfaces, baryc2locvrtxmap, edgemap);
+            }
         }
 
         std::string savepvname = OUTPUT_PATH + "volfined/volfined" + str_id + ".vol";
 
-        if(save_vol) {
+        if(save_vol && !profiler.core_only()) {
+            scaling::StageScope profile_stage("refined_volume_save", "io");
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "Ng_SaveMesh.volfined.begin");
             nglib::Ng_SaveMesh(submesh, savepvname.c_str());
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "Ng_SaveMesh.volfined.end");
         }
+
+        const int local_points_before_adjacency = nglib::Ng_GetNP(submesh);
+        const int local_surface_elements_before_adjacency = nglib::Ng_GetNSE(submesh);
+        const int local_volume_elements_before_adjacency = nglib::Ng_GetNE(submesh);
+        profiler.set_metric("local_points_before_adjacency", local_points_before_adjacency);
+        profiler.set_metric("local_surface_elements_before_adjacency", local_surface_elements_before_adjacency);
+        profiler.set_metric("local_volume_elements_before_adjacency", local_volume_elements_before_adjacency);
 
 
         if (isComputeAdj) {
             map<Barycvrtx, list<int>, CompBarycvrtx> barycvrtx2adjprocsmap;
-            computeadj(id,facemap,g2lvrtxmap, barycvrtx2adjprocsmap);
+            {
+                scaling::StageScope profile_stage("adjacency_build", "compute");
+                computeadj(id,facemap,g2lvrtxmap, barycvrtx2adjprocsmap);
+            }
 
             int *VEgid;
             int numNEs = nglib::Ng_GetNE(submesh);
             MYCALLOC(VEgid, int *, (numNEs + 1), sizeof(int));
 
-            printf("start com_barycoords, id: %d\n", id);
+            if (netgen_mpi_trace_enabled()) {
+                printf("start com_barycoords, id: %d\n", id);
+                fflush(stdout);
+            }
             // cout << id << "start com_barycoords" << endl;
 
             int *newid = com_barycoords(submesh, MPI_COMM_WORLD, barycvrtx2adjprocsmap,
                                         baryc2locvrtxmap, adjbarycs, numParts, VEgid, id);
 
-            
+
             // int pointdebug = nglib::Ng_GetNP((nglib::Ng_Mesh *)submesh);
             // char *debugpath = new char[512];
             // sprintf(debugpath,"pointdebugpath%d.txt",id);
@@ -432,13 +608,15 @@ int main(int argc, char **argv) {
             //     printf("createElmerOutput error id is %d\n", id);
             // }
 #if 1
-            nglib::Ng_Mesh* mesh = (nglib::Ng_Mesh *)submesh;
-            char * boundaryfile1 = new char[512];
-            char * elementfile1 = new char[512];
-            char * headerfile1 = new char[512];
-            char * nodefile1 = new char[512];
-            char * sharedfile1 = new char[512];
-            char * path1 = new char[512];
+            if (!profiler.core_only()) {
+                scaling::StageScope profile_stage("partition_result_io", "io");
+                nglib::Ng_Mesh* mesh = (nglib::Ng_Mesh *)submesh;
+                char * boundaryfile1 = new char[512];
+                char * elementfile1 = new char[512];
+                char * headerfile1 = new char[512];
+                char * nodefile1 = new char[512];
+                char * sharedfile1 = new char[512];
+                char * path1 = new char[512];
 
             sprintf(path1,"partitioning.%d",numParts);
             sprintf(boundaryfile1, "partitioning.%d/part.%d.boundary", numParts, id+1);
@@ -538,7 +716,7 @@ int main(int argc, char **argv) {
                 //     continue;
                 // }
                 geoid = nglib::GetBoundaryID(mesh,j+1) +1;
-                if(nglib::ispatbound(mesh,j+1)){
+                if(nglib::ispatbound(mesh,j)){
                     continue;
                 }
                 i3.x[0] = newid[surfpointss[0]];
@@ -565,18 +743,48 @@ int main(int argc, char **argv) {
             }
             outheader.close();
 
-
+            }
 #endif
 
-            printf("start com_baryVolumeElements, id: %d\n", id);
-            com_baryVolumeElements(submesh, MPI_COMM_WORLD, barycvrtx2adjprocsmap,
-                                   baryc2locvrtxmap, adjbarycs, newid, VEgid, VEindexs, numParts, id);
-            printf("createElmerOutput, id: %d\n", id);
-            
+            if (netgen_mpi_trace_enabled()) {
+                printf("start com_baryVolumeElements, id: %d\n", id);
+                fflush(stdout);
+            }
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "com_baryVolumeElements.begin");
+            newid = com_baryVolumeElements(
+                submesh, MPI_COMM_WORLD, barycvrtx2adjprocsmap,
+                baryc2locvrtxmap, adjbarycs, newid, VEgid,
+                VEindexs, numParts, id);
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "com_baryVolumeElements.end");
+            if (netgen_mpi_trace_enabled()) {
+                printf("createElmerOutput, id: %d\n", id);
+                fflush(stdout);
+            }
+
+            const int local_points_after_adjacency = nglib::Ng_GetNP(submesh);
+            const int local_surface_elements_after_adjacency = nglib::Ng_GetNSE(submesh);
+            const int local_volume_elements_after_adjacency = nglib::Ng_GetNE(submesh);
+            profiler.set_metric("local_points_after_adjacency", local_points_after_adjacency);
+            profiler.set_metric("local_surface_elements_after_adjacency", local_surface_elements_after_adjacency);
+            profiler.set_metric("local_volume_elements_after_adjacency", local_volume_elements_after_adjacency);
+            profiler.set_metric(
+                "ghost_points_added",
+                local_points_after_adjacency >= local_points_before_adjacency
+                    ? local_points_after_adjacency - local_points_before_adjacency
+                    : 0);
+            profiler.set_metric(
+                "ghost_volume_elements_added",
+                local_volume_elements_after_adjacency >= local_volume_elements_before_adjacency
+                    ? local_volume_elements_after_adjacency - local_volume_elements_before_adjacency
+                    : 0);
+
 
             savepvname = OUTPUT_PATH + "volwithadj/volwithadj" + str_id + ".vol";
-            if(save_vol) {
+            if(save_vol && !profiler.core_only()) {
+                scaling::StageScope profile_stage("final_mesh_save", "io");
+                netgen_mpi_checkpoint(MPI_COMM_WORLD, "Ng_SaveMesh.volwithadj.begin");
                 nglib::Ng_SaveMesh(submesh, savepvname.c_str());
+                netgen_mpi_checkpoint(MPI_COMM_WORLD, "Ng_SaveMesh.volwithadj.end");
 
                 // string openfoampath = OUTPUT_PATH + "openfoam/part" + str_id;
                 // mkdir(openfoampath.c_str(), 0777);
@@ -584,134 +792,110 @@ int main(int argc, char **argv) {
                 // nglib::My_WriteOpenFOAMFormat(submesh,outfile);
             }
 
+            free(newid);
+            free(VEgid);
+
 
         }
 
-        /*double endTime = MPI_Wtime();
-        double Fine_Time = (double)(endTime - Coarse_endTime);
-        double runtime = (double)(endTime - startTime);
-
-        savepvname = OUTPUT_PATH + "volwithadj/volwithadj" + str_id + ".vol";
-        if(save_vol) {
-
-        nglib::Ng_SaveMesh(submesh, savepvname.c_str());
-        }
-        if(id == 0) {
-            string savepvname_time = OUTPUT_PATH + "testout/testout_time" + str_id + ".txt";
-            fp_time = fopen(savepvname_time.c_str(), "w");
-            if (fp_time == NULL) {
-                cout << "File " << savepvname << "canot open" << endl;
-            }
-            else {
-            fprintf(fp_time, "Coarse_Time for id:%d is %.2f s\r\n", id, Coarse_Time);
-            fprintf(fp_time, "Fine_Time for id:%d is %.2f s\r\n", id, Fine_Time);
-            fprintf(fp_time, "runtime for id:%d is %.2f s\r\n", id, runtime);
-            for(int i = 0; i < 5; i++) {
-                fprintf(fp_time, "part %d time : %.2f \n", i, time[i]);
-            }
-            }
-            fclose(fp_time);
+        if (!isComputeAdj) {
+            profiler.set_metric("local_points_after_adjacency", nglib::Ng_GetNP(submesh));
+            profiler.set_metric("local_surface_elements_after_adjacency", nglib::Ng_GetNSE(submesh));
+            profiler.set_metric("local_volume_elements_after_adjacency", nglib::Ng_GetNE(submesh));
+            profiler.set_metric("ghost_points_added", 0.0);
+            profiler.set_metric("ghost_volume_elements_added", 0.0);
         }
 
-        savepvname = OUTPUT_PATH + "testout/testout_mesh.txt";
-        fp = fopen(savepvname.c_str(), "a");
-        if (fp == NULL) {
-            cout << "File " << savepvname << "canot open" << endl;
-        }
-        else {
-            //fprintf(fp, "the num of points for id:%d is %d\r\n", id, nglib::Ng_GetNP(submesh));
-            //fprintf(fp, "the num of Surelemments for id:%d is %d\r\n", id, nglib::Ng_GetNSE(submesh));
-            fprintf(fp, "the num of Volelements for id:%d is %d\r\n", id, nglib::Ng_GetNE(submesh));
-            fprintf(fp, "the volmesh generate time for if: %d is %f\r\n", id, volumeMesh_end-volumeMesh_start);
-        }
-        if(id == 0) {
-            int Volelements_Sum = nglib::Ng_GetNE(submesh);
-            for(int i = 1; i < p; i++) {
-                int Volelements_Buf = 0;
-                MPI_Recv(&Volelements_Buf, sizeof(Volelements_Buf), MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                Volelements_Sum += Volelements_Buf;
-            }
-            fprintf(fp, "the Sum of Volelements id %d\r\n", Volelements_Sum);
-
-        }
-        else {
-            int Volelements_Buf = nglib::Ng_GetNE(submesh);
-            MPI_Send(&Volelements_Buf, sizeof(Volelements_Buf), MPI_INT, 0, 0, MPI_COMM_WORLD);
-        }
-
-
-        fclose(fp);		/*
-        int *VEgids_list, *VEgid_isin_list;
-        MYCALLOC(VEgids_list, int *, (VEindexs.size() + 1), sizeof(int));
-        MYCALLOC(VEgid_isin_list, int *, (VEindexs.size() + 1), sizeof(int));
-        i = 1;
-        for (VEi = VEindexs.begin(); VEi != VEindexs.end(); ++VEi) {
-            VEgids_list[i] = (*VEi).gid;
-            VEgid_isin_list[i] = (*VEi).Isin;
-            i++;
-        }
-        */
-        //}
-        //else {
         double endTime = MPI_Wtime();
         double Fine_Time = (double)(endTime - Coarse_endTime);
         double runtime = (double)(endTime - startTime);
         savepvname = OUTPUT_PATH + "testout/testout_mesh.txt";
-        if(id == 0) {
-            string savepvname_time = OUTPUT_PATH + "testout/testout_time" + str_id + ".txt";
-            fp_time = fopen(savepvname_time.c_str(), "w");
-            if (fp_time == NULL) {
-                cout << "File " << savepvname << "canot open" << endl;
-            }
-            else {
+        if (!profiler.core_only()) {
+            if (id == 0) {
+                scaling::StageScope profile_stage("testout_io", "io");
+                string savepvname_time = OUTPUT_PATH + "testout/testout_time" + str_id + ".txt";
+                fp_time = fopen(savepvname_time.c_str(), "w");
+                if (fp_time == NULL) {
+                    fprintf(stderr, "[IO_ERROR] rank=0 cannot open %s\n", savepvname_time.c_str());
+                    fflush(stderr);
+                    MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+                    abort();
+                }
                 fprintf(fp_time, "Coarse_Time for id:%d is %.2f s\r\n", id, Coarse_Time);
                 fprintf(fp_time, "Fine_Time for id:%d is %.2f s\r\n", id, Fine_Time);
                 fprintf(fp_time, "runtime for id:%d is %.2f s\r\n", id, runtime);
-                for(int i = 0; i < 5; i++) {
+                for (int i = 0; i < 5; ++i)
                     fprintf(fp_time, "part %d time : %.2f \n", i, time[i]);
-                }
-                for(int i = 0; i < 6; i++) {
+                for (int i = 0; i < 6; ++i)
                     fprintf(fp_time, "part 1 detail %d time : %.2f \n", i, time_part1_detail[i]);
+                fclose(fp_time);
+            }
+
+            const long long local_volume_elements = nglib::Ng_GetNE(submesh);
+            const double local_volume_mesh_time = volumeMesh_end - volumeMesh_start;
+            long long total_volume_elements = 0;
+            double sum_volume_mesh_time = 0.0;
+            double max_volume_mesh_time = 0.0;
+
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "testout.reduce.begin");
+            {
+                scaling::StageScope profile_stage("final_count_exchange", "communication");
+                netgen_mpi_check(
+                    MPI_COMM_WORLD,
+                    MPI_Reduce(&local_volume_elements, &total_volume_elements, 1,
+                               MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD),
+                    "testout/MPI_Reduce(volume_elements)");
+                netgen_mpi_check(
+                    MPI_COMM_WORLD,
+                    MPI_Reduce(&local_volume_mesh_time, &sum_volume_mesh_time, 1,
+                               MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD),
+                    "testout/MPI_Reduce(volume_mesh_time_sum)");
+                netgen_mpi_check(
+                    MPI_COMM_WORLD,
+                    MPI_Reduce(&local_volume_mesh_time, &max_volume_mesh_time, 1,
+                               MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD),
+                    "testout/MPI_Reduce(volume_mesh_time_max)");
+            }
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "testout.reduce.end");
+
+            const std::uint64_t reduce_bytes = sizeof(long long) + 2 * sizeof(double);
+            profiler.add_communication(
+                "final_count_exchange",
+                id == 0 ? 0 : 3,
+                id == 0 ? static_cast<std::uint64_t>(3) * (p - 1) : 0,
+                id == 0 ? 0 : reduce_bytes,
+                id == 0 ? static_cast<std::uint64_t>(p - 1) * reduce_bytes : 0);
+
+            if (id == 0) {
+                scaling::StageScope profile_stage("testout_io", "io");
+                fp = fopen(savepvname.c_str(), "w");
+                if (fp == NULL) {
+                    fprintf(stderr, "[IO_ERROR] rank=0 cannot open %s\n", savepvname.c_str());
+                    fflush(stderr);
+                    MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+                    abort();
                 }
+                fprintf(fp, "the Sum of Volelements is %lld\r\n", total_volume_elements);
+                fprintf(fp, "volume mesh generate time mean is %.6f s\r\n",
+                        sum_volume_mesh_time / static_cast<double>(p));
+                fprintf(fp, "volume mesh generate time max is %.6f s\r\n",
+                        max_volume_mesh_time);
+                fclose(fp);
             }
-            fclose(fp_time);
         }
-        // savepvname = OUTPUT_PATH + "testout/testout.txt";
-
-        fp = fopen(savepvname.c_str(), "a");
-        if (fp == NULL) {
-            cout << "File " << savepvname << "canot open" << endl;
+        if (!profiler.core_only()) {
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "meshQualityEvaluation.begin");
+            meshQualityEvaluation(submesh, id, OUTPUT_PATH);
+            netgen_mpi_checkpoint(MPI_COMM_WORLD, "meshQualityEvaluation.end");
         }
-        else {
-            //fprintf(fp, "the num of points for id:%d is %d\r\n", id, nglib::Ng_GetNP(submesh));
-            //fprintf(fp, "the num of Surelemments for id:%d is %d\r\n", id, nglib::Ng_GetNSE(submesh));
-            fprintf(fp, "the num of Volelements for id:%d is %d\r\n", id, nglib::Ng_GetNE(submesh));
-            fprintf(fp, "the volmesh generate time for if: %d is %f\r\n", id, volumeMesh_end-volumeMesh_start);
-        }
-        if(id == 0) {
-            int Volelements_Sum = nglib::Ng_GetNE(submesh);
-            for(int i = 1; i < p; i++) {
-                int Volelements_Buf = 0;
-                MPI_Recv(&Volelements_Buf, sizeof(Volelements_Buf), MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                Volelements_Sum += Volelements_Buf;
-            }
-            fprintf(fp, "the Sum of Volelements id %d\r\n", Volelements_Sum);
-
-        }
-        else {
-            int Volelements_Buf = nglib::Ng_GetNE(submesh);
-            MPI_Send(&Volelements_Buf, sizeof(Volelements_Buf), MPI_INT, 0, 0, MPI_COMM_WORLD);
-        }
-
-
-        fclose(fp);
-        //}
-        meshQualityEvaluation(submesh, id, OUTPUT_PATH);
 
 
     }
 
     if(id == 0) cout << "successful!!!" << endl;
+    profiler.set_total_elapsed(MPI_Wtime() - startTime);
+    profiler.finalize();
+    netgen_mpi_checkpoint(MPI_COMM_WORLD, "MPI_Finalize.begin");
     MPI_Finalize();
 
     return 0;

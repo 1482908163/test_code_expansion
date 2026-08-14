@@ -1,0 +1,31 @@
+Strong Scaling Summary (强扩展汇总)
+==========================================================================================================================================
+Experiment (实验): core_cache
+Baseline (基准): 1024 processes, 46.943225 s
+
+      P   Runs     Time(s)    Speedup    Eff(%)    Wait(%)    Comm(%)    I/O(%)  Cover(%)   CacheMiss(%)      IPC   Load M/A    RSS(MiB)    CV(%)
+------------------------------------------------------------------------------------------------------------------------------------------
+   1024      6     46.943     1.000   100.00     16.19      2.04     4.03    95.94         1.859   0.540     1.563    1024.66   10.01
+   2048      6     42.417     1.107    55.34     13.04      4.31     4.53    95.90         1.809   0.530     1.551     619.76   12.40
+   4096      6     43.272     1.085    27.12     17.81      9.62     4.55    96.05         1.822   0.539     1.654     595.35   12.01
+   8192      6     46.810     1.003    12.54     27.64     17.10     4.12    96.19         1.722   0.532     2.465     452.67   10.50
+
+Observed change (首末规模变化)
+  Parallel efficiency (并行效率): 100.00% -> 12.54%
+  Collective arrival-wait fraction (集合通信到达等待占比): 16.19% -> 27.64%
+  Aligned communication execution fraction (对齐后通信执行占比): 2.04% -> 17.10%
+  I/O fraction (I/O 占比): 4.03% -> 4.12%
+  Cache miss rate (缓存未命中率): 1.859% -> 1.722%
+  Volume load imbalance max/avg (体单元负载不均衡): 1.563 -> 2.465
+
+Files (文件)
+  scaling_summary.csv  各进程数的中位数、加速比和并行效率
+  stage_scaling.csv    各进程数逐阶段的中位数指标
+  collective_split.csv 各集合通信的到达等待/对齐执行拆分
+  collective_split_report.txt 集合通信拆分可读报告
+  communication_summary.csv 通信图、消息量与尾部等待汇总
+  communication_report.txt 通信诊断可读报告
+  all_runs.csv         所有重复实验的原始总指标
+  cold_warm_summary.csv  冷/热页缓存分离汇总
+  cold_warm_report.txt   冷/热页缓存可读报告
+  scaling_report.txt   本文件

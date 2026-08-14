@@ -1,0 +1,153 @@
+Strong-scaling environment (强扩展运行环境)
+================================================
+time=2026-08-11T16:14:11+0800
+hostname=cn4988
+repository_root=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion
+git_commit=unknown
+slurm_job_id=5932606
+slurm_job_nodelist=cn[4988-5115]
+run_name=strong_scaling_full_io_l2_r2_20260811-160928
+process_counts=128
+repeats=3
+ranks_per_node=1
+launcher=yhrun
+launcher_extra_args=--mpi=pmix
+cpu_bind=cores
+omp_num_threads=1
+core_only=0
+cache_counters=0
+mesh_executable=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/build/mesh_occ_mpi/mesh_occ_mpi
+input_mesh=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+levels=2
+refines=2
+maxh=1000.0
+minh=0.0
+GCCHOME=/vol8/home/hnu_lhz/cjz/gcc-12
+MPICH_CC=/vol8/home/hnu_lhz/cjz/gcc-12/bin/gcc
+MPICH_CXX=/vol8/home/hnu_lhz/cjz/gcc-12/bin/g++
+LD_LIBRARY_PATH=/vol8/home/hnu_lhz/cjz/gcc-12/lib64:/vol8/home/hnu_lhz/cjz/NETGEN/install/lib:/vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu:/vol8/appsoftware/mpi-x/lib
+perf_event_paranoid=1
+
+--- uname -a ---
+Linux cn4988 5.4.0-65-mt+ #7 SMP Fri Dec 26 16:51:15 CST 2025 aarch64 aarch64 aarch64 GNU/Linux
+
+--- lscpu ---
+Architecture:                    aarch64
+CPU op-mode(s):                  64-bit
+Byte Order:                      Little Endian
+CPU(s):                          16
+On-line CPU(s) list:             0-15
+Thread(s) per core:              1
+Core(s) per socket:              1
+Socket(s):                       16
+NUMA node(s):                    8
+Vendor ID:                       0x70
+Model:                           2
+Stepping:                        0x1
+BogoMIPS:                        100.00
+NUMA node0 CPU(s):               0,1
+NUMA node1 CPU(s):               2,3
+NUMA node2 CPU(s):               4,5
+NUMA node3 CPU(s):               6,7
+NUMA node4 CPU(s):               8,9
+NUMA node5 CPU(s):               10,11
+NUMA node6 CPU(s):               12,13
+NUMA node7 CPU(s):               14,15
+Vulnerability Itlb multihit:     Not affected
+Vulnerability L1tf:              Not affected
+Vulnerability Mds:               Not affected
+Vulnerability Meltdown:          Mitigation; PTI
+Vulnerability Spec store bypass: Vulnerable
+Vulnerability Spectre v1:        Mitigation; __user pointer sanitization
+Vulnerability Spectre v2:        Vulnerable
+Vulnerability Srbds:             Not affected
+Vulnerability Tsx async abort:   Not affected
+Flags:                           fp asimd evtstrm crc32 cpuid
+
+--- lscpu --caches ---
+
+--- module list ---
+Currently Loaded Modulefiles:
+ 1) mpich/mpi-x(default)  
+
+Key:
+(symbolic-version)  
+
+--- ldd mesh_occ_mpi ---
+	linux-vdso.so.1 (0x0000400025ad2000)
+	libnglib.so => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libnglib.so (0x0000400025ae4000)
+	libTKOffset.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKOffset.so.7 (0x0000400026015000)
+	libTKSTL.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKSTL.so.7 (0x0000400026194000)
+	libTKXDEIGES.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKXDEIGES.so.7 (0x00004000261bd000)
+	libTKXDESTEP.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKXDESTEP.so.7 (0x00004000261e6000)
+	libTKFillet.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKFillet.so.7 (0x00004000262a8000)
+	libTKIGES.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKIGES.so.7 (0x00004000264cd000)
+	libTKBool.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKBool.so.7 (0x000040002689c000)
+	libTKSTEP.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKSTEP.so.7 (0x0000400026c4a000)
+	libTKSTEP209.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKSTEP209.so.7 (0x0000400026f8a000)
+	libTKSTEPAttr.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKSTEPAttr.so.7 (0x0000400027042000)
+	libTKSTEPBase.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKSTEPBase.so.7 (0x0000400027160000)
+	libTKXCAF.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKXCAF.so.7 (0x000040002740d000)
+	libTKVCAF.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKVCAF.so.7 (0x00004000274ee000)
+	libTKCAF.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKCAF.so.7 (0x000040002753a000)
+	libTKBO.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKBO.so.7 (0x00004000275e6000)
+	libTKPrim.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKPrim.so.7 (0x000040002785b000)
+	libTKLCAF.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKLCAF.so.7 (0x00004000278cb000)
+	libTKCDF.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKCDF.so.7 (0x00004000279c4000)
+	libTKV3d.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKV3d.so.7 (0x0000400027a28000)
+	libTKHLR.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKHLR.so.7 (0x0000400027d4f000)
+	libTKMesh.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKMesh.so.7 (0x0000400027e64000)
+	libTKService.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKService.so.7 (0x0000400027f7a000)
+	libfontconfig.so.1 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libfontconfig.so.1 (0x000040002809b000)
+	libGL.so.1 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libGL.so.1 (0x00004000280f0000)
+	libX11.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libX11.so.6 (0x00004000281e7000)
+	libXext.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libXext.so.6 (0x000040002832c000)
+	libXmu.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libXmu.so.6 (0x000040002834f000)
+	libXi.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libXi.so.6 (0x0000400028378000)
+	libfreetype.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libfreetype.so.6 (0x0000400028398000)
+	libTKXSBase.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKXSBase.so.7 (0x0000400028457000)
+	libTKShHealing.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKShHealing.so.7 (0x00004000286f9000)
+	libTKTopAlgo.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKTopAlgo.so.7 (0x0000400028954000)
+	libTKGeomAlgo.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKGeomAlgo.so.7 (0x0000400028bfb000)
+	libTKBRep.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKBRep.so.7 (0x0000400029052000)
+	libTKGeomBase.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKGeomBase.so.7 (0x000040002915b000)
+	libTKG3d.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKG3d.so.7 (0x00004000295c9000)
+	libTKG2d.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKG2d.so.7 (0x00004000296e5000)
+	libTKMath.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKMath.so.7 (0x0000400029750000)
+	libTKernel.so.7 => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libTKernel.so.7 (0x00004000299ab000)
+	libpthread.so.0 => /usr/lib/aarch64-linux-gnu/libpthread.so.0 (0x0000400029b92000)
+	librt.so.1 => /usr/lib/aarch64-linux-gnu/librt.so.1 (0x0000400029bc5000)
+	libstdc++.so.6 => /vol8/home/hnu_lhz/cjz/gcc-12/lib64/libstdc++.so.6 (0x0000400029bdd000)
+	libdl.so.2 => /usr/lib/aarch64-linux-gnu/libdl.so.2 (0x0000400029e00000)
+	libmpicxx.so.12 => /vol8/appsoftware/mpi-x/lib/libmpicxx.so.12 (0x0000400029e14000)
+	libmpi.so.12 => /vol8/appsoftware/mpi-x/lib/libmpi.so.12 (0x0000400029e47000)
+	libm.so.6 => /usr/lib/aarch64-linux-gnu/libm.so.6 (0x000040002bfd6000)
+	libgcc_s.so.1 => /vol8/home/hnu_lhz/cjz/gcc-12/lib64/libgcc_s.so.1 (0x000040002c083000)
+	libc.so.6 => /usr/lib/aarch64-linux-gnu/libc.so.6 (0x000040002c0a8000)
+	libngcore.so => /vol8/home/hnu_lhz/cjz/NETGEN/install/lib/libngcore.so (0x000040002c21b000)
+	libz.so.1 => /usr/lib/aarch64-linux-gnu/libz.so.1 (0x000040002c2b9000)
+	libexpat.so.1 => /usr/lib/aarch64-linux-gnu/libexpat.so.1 (0x000040002c2e5000)
+	libuuid.so.1 => /usr/lib/aarch64-linux-gnu/libuuid.so.1 (0x000040002c31e000)
+	/lib/ld-linux-aarch64.so.1 (0x0000400025ab0000)
+	libGLdispatch.so.0 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libGLdispatch.so.0 (0x000040002c335000)
+	libGLX.so.0 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libGLX.so.0 (0x000040002c4c0000)
+	libxcb.so.1 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libxcb.so.1 (0x000040002c502000)
+	libXt.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libXt.so.6 (0x000040002c539000)
+	libpng16.so.16 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libpng16.so.16 (0x000040002c5a5000)
+	libpmix.so.2 => /usr/lib/libpmix.so.2 (0x000040002c5e9000)
+	libhwloc.so.15 => /usr/lib/aarch64-linux-gnu/libhwloc.so.15 (0x000040002c6dc000)
+	libucp.so.0 => /usr/local/ucx/lib/libucp.so.0 (0x000040002c735000)
+	libucs.so.0 => /usr/local/ucx/lib/libucs.so.0 (0x000040002c7fc000)
+	libXau.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libXau.so.6 (0x000040002c866000)
+	libXdmcp.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libXdmcp.so.6 (0x000040002c87a000)
+	libSM.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libSM.so.6 (0x000040002c890000)
+	libICE.so.6 => /vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu/libICE.so.6 (0x000040002c8a8000)
+	libutil.so.1 => /usr/lib/aarch64-linux-gnu/libutil.so.1 (0x000040002c8d4000)
+	libevent_core-2.1.so.7 => /usr/lib/aarch64-linux-gnu/libevent_core-2.1.so.7 (0x000040002c8e8000)
+	libevent_pthreads-2.1.so.7 => /usr/lib/aarch64-linux-gnu/libevent_pthreads-2.1.so.7 (0x000040002c92e000)
+	libudev.so.1 => /usr/lib/aarch64-linux-gnu/libudev.so.1 (0x000040002c941000)
+	libltdl.so.7 => /usr/lib/aarch64-linux-gnu/libltdl.so.7 (0x000040002c97b000)
+	libuct.so.0 => /usr/local/ucx/lib/libuct.so.0 (0x000040002c997000)
+	libnuma.so.1 => /usr/lib/aarch64-linux-gnu/libnuma.so.1 (0x000040002c9e0000)
+	libucm.so.0 => /usr/local/ucx/lib/libucm.so.0 (0x000040002c9ff000)
+	libbsd.so.0 => /usr/lib/aarch64-linux-gnu/libbsd.so.0 (0x000040002ca29000)

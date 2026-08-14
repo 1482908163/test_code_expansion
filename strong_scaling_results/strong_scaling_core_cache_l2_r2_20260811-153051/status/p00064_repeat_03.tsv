@@ -1,0 +1,2 @@
+processes	nodes	repeat	state	exit_code	runtime_s	log
+64	64	3	COMPLETED	0	47	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_core_cache_l2_r2_20260811-153051/launcher_logs/p00064_repeat_03.log

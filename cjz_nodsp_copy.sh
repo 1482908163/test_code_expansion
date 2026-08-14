@@ -1,25 +1,26 @@
 #!/bin/bash
 #SBATCH --job-name=Mesh_test
-#SBATCH --output=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_time/err/02_r43_c256_%j.out
-#SBATCH --error=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_time/err/02_r43_c256_%j.err
+#SBATCH --output=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/err/02_r33_c512_pp16_%j.out
+#SBATCH --error=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/err/02_r33_c512_pp16_%j.err
 #SBATCH -p mt_module
-#SBATCH --nodes=256
-#SBATCH --ntasks=256
+#SBATCH --nodes=512
+#SBATCH --ntasks=8192
+#SBATCH --ntasks-per-node=16
 #SBATCH --cpus-per-task=1
 
 set -euo pipefail
 
 GCCHOME=/vol8/home/hnu_lhz/cjz/gcc-12
-PROJ_DIR=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_time
+PROJ_DIR=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion
 BIN_PATH=$PROJ_DIR/build/mesh_occ_mpi/mesh_occ_mpi
 LOCAL_LIB=/vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu
 
 INPUT_PATH=$PROJ_DIR/inputData/wholewall3solid.STEP
 ERR_DIR=$PROJ_DIR/err
 
-OUTPUT_PATH=$PROJ_DIR/result/02_r43_c256/
+OUTPUT_PATH=$PROJ_DIR/result/02_r33_c512_pp16/
 
-numlevels=4
+numlevels=3
 numrefine=3
 maxh=1000.0
 minh=0.0

@@ -1,0 +1,35 @@
+Unified Strong-scaling Suite (统一强扩展实验报告)
+==========================================================================================================================================
+Suite directory (实验目录): /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_comm_graph_pp16_20260814-215051
+Requested modes (请求模式): comm_graph
+Available modes (有效模式): comm_graph
+Core timing source (核心计时来源): comm_graph
+P-job scheduling (不同 P 调度): concurrent
+Page-cache policy (页缓存策略): core=evict-first, full_io=missing
+主曲线使用 warm（repeat 2+ 中位数）；cold（repeat 1）单独列出，不再混入波动系数。
+
+Execution status (执行状态): 4/4 completed; details: suite_status.csv
+Warm strong scaling (热缓存强扩展)
+      P     Core(s)    Speedup    Eff(%)    Wait(s)   Wait(%)    Comm(s)   Comm(%)    Miss(%)      IPC   FullIO(s)    I/O(%)   Extra(%)
+------------------------------------------------------------------------------------------------------------------------------------------
+   1024     46.787     1.000   100.00     7.540    16.11     0.971     2.07       N/A     N/A        N/A      N/A       N/A
+   2048     42.048     1.113    55.64     5.570    13.25     1.832     4.34       N/A     N/A        N/A      N/A       N/A
+   4096     42.784     1.094    27.34     7.707    18.08     4.177     9.80       N/A     N/A        N/A      N/A       N/A
+   8192     46.482     1.007    12.58    13.355    28.64     8.092    17.40       N/A     N/A        N/A      N/A       N/A
+
+Wait 是集合通信前置 MPI_Barrier 的到达对齐时间；Comm 是对齐后的集合通信执行与点对点通信阶段，不是纯网络线速传输，仍包含 MPI 算法和协议开销；阻塞式点对点调用还可能包含对端就绪等待。
+
+Cold vs warm page cache (冷/热页缓存)
+      P    CoreCold    CoreWarm   CorePenalty%      IOCold      IOWarm   IOPenalty%     CorePhysR C/W(GiB)     IOPhysR C/W(GiB)
+-------------------------------------------------------------------------------------------------------------------------------
+   1024     63.676     46.787         36.10        N/A        N/A         N/A           0.843/0.000                 N/A
+   2048     56.893     42.048         35.31        N/A        N/A         N/A           1.685/0.000                 N/A
+   4096     71.468     42.784         67.04        N/A        N/A         N/A           3.348/0.000                 N/A
+   8192     61.263     46.482         31.80        N/A        N/A         N/A           6.592/0.000                 N/A
+
+Files (文件)
+  suite_summary.csv                   统一绘图数据
+  suite_status.csv                    每个 P、每种模式的完成/失败/缺失状态
+  mode_analysis_status.tsv            各模式汇总脚本状态
+  suite_report.txt                    本文件
+  ../modes/comm_graph/analysis/            comm_graph 的详细阶段报告
