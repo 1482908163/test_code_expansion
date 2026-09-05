@@ -7,6 +7,7 @@
 #include "3DNgmesher.h"
 #include "scaling_profiler.h"
 #include "mpi_debug.h"
+#include "research_mesh.h"
 #include <string>
 #include <time.h>
 
@@ -254,8 +255,23 @@ void ExtractPartitionSurfaceMesh(void *mesh, idx_t *edest, std::map<int, xdMeshF
 
 	//使用Allgather_Face_Map函数收集所有进程的结果，得到最终的表面网格
 	double allgather_stage_time[3] = {0.0, 0.0, 0.0};
-	Allgather_Face_Map(facemap, sub_face_map.data(), ne, sub_ne,
-						every_sub_ne.data(), every_offset.data(), allgather_stage_time);
+	if (mesh_research::options().sparse()) {
+        const double begin = MPI_Wtime();
+        {
+            scaling::StageScope phase("face_sparse_total", "algorithm");
+            SparseGatherFaceMap(facemap, sub_face_map.data(), sub_ne*4, start_ne);
+        }
+        allgather_stage_time[1] = MPI_Wtime() - begin;
+        if (mesh_research::options().verify_faces) {
+            std::map<int, xdMeshFaceInfo> reference;
+            Allgather_Face_Map(reference, sub_face_map.data(), ne, sub_ne,
+                              every_sub_ne.data(), every_offset.data());
+            VerifyFaceClosure(facemap, reference, id);
+        }
+    } else {
+        Allgather_Face_Map(facemap, sub_face_map.data(), ne, sub_ne,
+                          every_sub_ne.data(), every_offset.data(), allgather_stage_time);
+    }
 	if (stage_time) {
 		stage_time[2] = allgather_stage_time[0];
 		stage_time[3] = allgather_stage_time[1];
@@ -298,7 +314,7 @@ void GetSurfPoints(void *mesh, surfMap_t &surfMap)
 void ExtractSurfaceMesh(void *mesh, int fid, int procid, int *tverts, fid_xdMeshFaceInfo *sub_face_map, int sub_face_map_index, int domainidx)
 {
 	nglib::Ng_Mesh *newMesh = (nglib::Ng_Mesh *)mesh;
-	xdMeshFaceInfo finfo;
+	xdMeshFaceInfo finfo{};
 	std::map<int, xdMeshFaceInfo>::iterator it;
 	int fverts[3];
 	int outw;
@@ -431,7 +447,7 @@ void fid_xdMeshFaceInfo::build_MPIType() {
 
 static void ProfileCollectiveArrivalWait(const char *stage, MPI_Comm comm)
 {
-	if (!scaling::Profiler::instance().enabled()) return;
+	if (!scaling::Profiler::instance().split_collectives()) return;
 	scaling::StageScope profile_stage(stage, "synchronization");
 	MPI_Barrier(comm);
 }
@@ -442,7 +458,8 @@ void Allgather_Face_Map(std::map<int, xdMeshFaceInfo> &facemap, fid_xdMeshFaceIn
 	}
 	double gather_start = MPI_Wtime();
 
-	int rank;
+	int rank, comm_size;
+    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
 	//获取当前进程的MPI等级
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	fid_xdMeshFaceInfo *sub_face_maps = nullptr;
@@ -471,8 +488,9 @@ void Allgather_Face_Map(std::map<int, xdMeshFaceInfo> &facemap, fid_xdMeshFaceIn
 	MPI_Type_size(fid_xdMeshFaceInfo::MPI_type, &face_record_bytes);
 	scaling::Profiler::instance().add_communication(
 		"face_allgatherv", 1, 1,
-		static_cast<std::uint64_t>(sub_ne) * 4ULL * face_record_bytes,
-		static_cast<std::uint64_t>(ne) * 4ULL * face_record_bytes);
+		static_cast<std::uint64_t>(sub_ne) * 4ULL * face_record_bytes *
+            static_cast<std::uint64_t>(comm_size-1),
+        static_cast<std::uint64_t>(ne-sub_ne) * 4ULL * face_record_bytes);
 	double after_allgather = MPI_Wtime();
 	if (stage_time) stage_time[1] = after_allgather - before_allgather;
 	//释放自定义的数据类型
@@ -1473,10 +1491,17 @@ int *com_barycoords(
 		MPI_Allgather(&newglobalnocounter, 1, MPI_INT, globoffsets, 1, MPI_INT, comm);
 	}
 	scaling::Profiler::instance().add_communication(
-		"vertex_count_allgather", 1, 1, sizeof(int),
-		static_cast<std::uint64_t>(numprocs) * sizeof(int));
-	for (i = 0; i < numprocs; i++)
-		globoffsets[i] += globoffsets[i - 1];
+		"vertex_count_allgather", 1, 1, static_cast<std::uint64_t>(numprocs-1) * sizeof(int),
+		static_cast<std::uint64_t>(numprocs-1) * sizeof(int));
+    for (i = 0; i < numprocs; i++) {
+        const long long prefix = static_cast<long long>(globoffsets[i]) + globoffsets[i-1];
+        if (prefix > std::numeric_limits<int>::max()) {
+            if (mypid == 0) std::fprintf(stderr,
+                "Global mesh IDs exceed the current 32-bit format; a 64-bit numbering migration is required.\n");
+            MPI_Abort(comm, MPI_ERR_COUNT);
+        }
+        globoffsets[i] = static_cast<int>(prefix);
+    }
 	// add offsets to global numbers
 	// new
 	for (locid = 1; locid <= numverts; locid++)
@@ -1498,10 +1523,17 @@ int *com_barycoords(
 		MPI_Allgather(&numNEs, 1, MPI_INT, globoffsetsVE, 1, MPI_INT, comm);
 	}
 	scaling::Profiler::instance().add_communication(
-		"element_count_allgather", 1, 1, sizeof(int),
-		static_cast<std::uint64_t>(numprocs) * sizeof(int));
-	for (i = 0; i < numprocs; i++)
-		globoffsetsVE[i] += globoffsetsVE[i - 1];
+		"element_count_allgather", 1, 1, static_cast<std::uint64_t>(numprocs-1) * sizeof(int),
+		static_cast<std::uint64_t>(numprocs-1) * sizeof(int));
+    for (i = 0; i < numprocs; i++) {
+        const long long prefix = static_cast<long long>(globoffsetsVE[i]) + globoffsetsVE[i-1];
+        if (prefix > std::numeric_limits<int>::max()) {
+            if (mypid == 0) std::fprintf(stderr,
+                "Global mesh IDs exceed the current 32-bit format; a 64-bit numbering migration is required.\n");
+            MPI_Abort(comm, MPI_ERR_COUNT);
+        }
+        globoffsetsVE[i] = static_cast<int>(prefix);
+    }
 	// add offsets to global numbers
 	// new
 	for (locVEid = 1; locVEid <= numNEs; locVEid++)
@@ -1578,11 +1610,7 @@ int *com_barycoords(
 		"vertex_num_s", static_cast<double>(num_s));
 	scaling::Profiler::instance().set_metric(
 		"vertex_num_r", static_cast<double>(num_r));
-	scaling::Profiler::instance().record_peer_exchange(
-		"vertex_exchange",
-		num_s, dest, s_length,
-		num_r, src, r_length,
-		static_cast<std::uint64_t>(barycentric_type_bytes));
+
 	{
 		scaling::StageScope profile_stage("vertex_exchange_unpack", "compute");
 		for (i = 0; i < num_r; i++)
@@ -1753,10 +1781,10 @@ int *com_baryVolumeElements(
 	}
 	scaling::Profiler::instance().add_communication(
 		"volume_size_exchange",
-		static_cast<std::uint64_t>(comm_size),
-		static_cast<std::uint64_t>(comm_size),
-		static_cast<std::uint64_t>(comm_size) * sizeof(int),
-		static_cast<std::uint64_t>(comm_size) * sizeof(int));
+		static_cast<std::uint64_t>(comm_size-1),
+		static_cast<std::uint64_t>(comm_size-1),
+		static_cast<std::uint64_t>(comm_size-1) * sizeof(int),
+		static_cast<std::uint64_t>(comm_size-1) * sizeof(int));
 
 	std::vector<int> dest;
 	std::vector<int> src;
@@ -1835,11 +1863,7 @@ int *com_baryVolumeElements(
 		"volume_num_s", static_cast<double>(num_s));
 	scaling::Profiler::instance().set_metric(
 		"volume_num_r", static_cast<double>(num_r));
-	scaling::Profiler::instance().record_peer_exchange(
-		"volume_payload_exchange",
-		num_s, dest.data(), s_length.data(),
-		num_r, src.data(), r_length.data(),
-		static_cast<std::uint64_t>(volume_element_type_bytes));
+
 
 	int *newgid = nullptr;
 	{

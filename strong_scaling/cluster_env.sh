@@ -2,7 +2,7 @@
 
 # Shared build/run environment for the mt_module partition.
 #
-# This file is sourced by build_profiled.sh and run_experiments.sh.  The
+# This file is sourced by run_experiments.sh.  The
 # defaults mirror build_project.sh and cjz_nodsp_copy.sh, while PROJECT_ROOT is
 # resolved from the current checkout so that a renamed/moved clone still works.
 

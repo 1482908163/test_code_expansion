@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PROJ_DIR=/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion
+PROJ_DIR="${PROJ_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 BUILD_DIR=$PROJ_DIR/build
 GCCHOME=/vol8/home/hnu_lhz/cjz/gcc-12
 LOCAL_LIB=/vol8/home/hnu_lhz/cjz/lib/usr/lib/aarch64-linux-gnu

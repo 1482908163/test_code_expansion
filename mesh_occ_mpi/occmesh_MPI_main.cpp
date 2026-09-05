@@ -1,5 +1,6 @@
 #include <iostream>
 #include <climits>
+#include <cmath>
 #include "mpi.h"
 #include "TopTools_IndexedMapOfShape.hxx"
 #include "TopoDS.hxx"
@@ -10,6 +11,7 @@
 #include "3DNgmesher.h"
 #include "scaling_profiler.h"
 #include "mpi_debug.h"
+#include "research_mesh.h"
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <cstdlib>
@@ -33,9 +35,13 @@ void print_help() {
          "-minh : 网格最小值 默认为10.0" << endl <<
          "-v : 保存细化文件" << endl <<
          "-adj : 通信" << endl <<
+         "--algorithm <baseline|balance|sparse|combined> : 原算法/均衡/稀疏/组合" << endl <<
+         "--balance-sweeps <整数> : 分区修正轮数，默认4" << endl <<
+         "--cut-growth <比例> : 允许新增切分面比例，默认0.05" << endl <<
+         "--cost-weights <a,b,c,d> : 四阶段代价权重，默认1,1,1,1" << endl <<
+         "--verify-faces : 与全收集结果核对；仅用于小规模正确性运行" << endl <<
+         "--profile-natural : 采集自然运行时间，关闭诊断用前置屏障" << endl <<
          "--profile : 开启强扩展指标采集" << endl <<
-         "--profile-cache : 尝试采集硬件缓存访问/未命中计数" << endl <<
-         "--profile-comm-graph : 记录逐 rank 收发邻居集和逐边消息量" << endl <<
          "--profile-core-only : 跳过普通网格结果写出和质量评价，仅测试核心算法" << endl <<
          "--profile-dir <目录> : 分析结果根目录，默认 <输出目录>/strong_scaling_results" << endl <<
          "--profile-experiment <名称> : 实验名称" << endl <<
@@ -69,8 +75,7 @@ int main(int argc, char **argv) {
     int numrefine = 0;
     double maxh = 1000.0,minh = 10.0;
     bool profile_enabled = false;
-    bool profile_cache = false;
-    bool profile_comm_graph = false;
+    bool profile_split = true;
     bool profile_core_only = false;
     string profile_dir;
     string profile_experiment = "strong_scaling";
@@ -149,13 +154,40 @@ int main(int argc, char **argv) {
         else if(!strcmp(argv[i],"--profile")) {
             profile_enabled = true;
         }
-        else if(!strcmp(argv[i],"--profile-cache")) {
-            profile_enabled = true;
-            profile_cache = true;
+        else if(!strcmp(argv[i],"--profile-natural")) {
+            profile_enabled = true; profile_split = false;
         }
-        else if(!strcmp(argv[i],"--profile-comm-graph")) {
-            profile_enabled = true;
-            profile_comm_graph = true;
+        else if(!strcmp(argv[i],"--verify-faces")) {
+            mesh_research::options().verify_faces = true;
+        }
+        else if(!strcmp(argv[i],"--algorithm") || !strcmp(argv[i],"--balance-sweeps") ||
+                !strcmp(argv[i],"--cut-growth") || !strcmp(argv[i],"--cost-weights")) {
+            const std::string option=argv[i];
+            if(i+1>=argc) { if(id==0) print_help(); MPI_Abort(MPI_COMM_WORLD,2); }
+            const std::string value=argv[++i];
+            try {
+                auto &research=mesh_research::options();
+                std::size_t consumed=0;
+                if(option=="--algorithm") research.algorithm=value;
+                else if(option=="--balance-sweeps") {
+                    research.cost.sweeps=std::stoi(value,&consumed);
+                    if(consumed!=value.size()) throw std::runtime_error("invalid sweeps");
+                } else if(option=="--cut-growth") {
+                    research.cost.cut_growth=std::stod(value,&consumed);
+                    if(consumed!=value.size()) throw std::runtime_error("invalid cut growth");
+                } else {
+                    std::istringstream in(value);std::string field;
+                    for(int k=0;k<4;++k) {
+                        if(!std::getline(in,field,','))throw std::runtime_error("need four cost weights");
+                        research.cost.weights[k]=std::stod(field,&consumed);
+                        if(consumed!=field.size())throw std::runtime_error("invalid cost weight");
+                    }
+                    if(std::getline(in,field,','))throw std::runtime_error("too many cost weights");
+                }
+            } catch(const std::exception &e) {
+                if(id==0) std::cerr<<e.what()<<std::endl;
+                MPI_Abort(MPI_COMM_WORLD,2);
+            }
         }
         else if(!strcmp(argv[i],"--profile-core-only")) {
             profile_enabled = true;
@@ -190,7 +222,17 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (profile_repeat < 1) profile_repeat = 1;
+    auto &research = mesh_research::options();
+    research.cost.levels=numlevels;research.cost.refines=numrefine;
+    if ((research.algorithm!="baseline" && research.algorithm!="balance" &&
+         research.algorithm!="sparse" && research.algorithm!="combined") ||
+        (research.verify_faces && (!research.sparse() || profile_enabled)) ||
+        numlevels<0 || numrefine<0 || numlevels+numrefine>13 ||
+        research.cost.sweeps<0 || !std::isfinite(research.cost.cut_growth) ||
+        research.cost.cut_growth<0) {
+        if(id==0) std::cerr<<"Invalid algorithm/configuration; face verification requires sparse/combined and profiling OFF. levels+refines must be <=13 (short barycentric coordinates)."<<std::endl;
+        MPI_Abort(MPI_COMM_WORLD,2);
+    }
     if (profile_dir.empty()) {
         profile_dir = OUTPUT_PATH;
         if (!profile_dir.empty() && profile_dir.back() != '/') profile_dir += '/';
@@ -199,8 +241,7 @@ int main(int argc, char **argv) {
 
     scaling::ProfileConfig profile_config;
     profile_config.enabled = profile_enabled;
-    profile_config.collect_hardware_cache = profile_cache;
-    profile_config.collect_communication_graph = profile_comm_graph;
+    profile_config.split_collectives = profile_split;
     profile_config.core_only = profile_core_only;
     profile_config.output_root = profile_dir;
     profile_config.experiment = profile_experiment;
@@ -222,13 +263,24 @@ int main(int argc, char **argv) {
     profiler.add_metadata("minh", std::to_string(minh));
     profiler.add_metadata("adjacency_enabled", isComputeAdj ? "true" : "false");
     profiler.add_metadata("save_vol", save_vol ? "true" : "false");
-    profiler.add_metadata("profiler_schema_version", "3");
+    profiler.add_metadata("profiler_schema_version", "research_1");
+    profiler.add_metadata("algorithm",research.algorithm);
+    profiler.add_metadata("timing_mode",profile_split?"split":"natural");
+    profiler.add_metadata("timing_boundary","post_coarse_barrier_to_adjacency_complete");
+    profiler.add_metadata("core_only",profile_core_only?"true":"false");
+    profiler.add_metadata("partition_contract","one partition per MPI rank");
+    profiler.add_metadata("cost_model","geometric boundary spacing proxy, not calibrated seconds");
+    profiler.add_metadata("cut_growth",std::to_string(research.cost.cut_growth));
+    profiler.add_metadata("balance_sweeps",std::to_string(research.cost.sweeps));
+    std::ostringstream weights;
+    for(int k=0;k<4;++k)weights<<(k?",":"")<<research.cost.weights[k];
+    profiler.add_metadata("cost_weights",weights.str());
     profiler.add_metadata(
         "collective_timing",
-        "pre_barrier_arrival_wait_then_aligned_collective_execution");
+        profile_split?"pre_barrier_wait_then_execution":"natural_collective_includes_arrival_skew");
     profiler.add_metadata(
         "communication_fraction_definition",
-        "communication_execution_only; arrival_wait_reported_separately");
+        "off_rank_logical_payload; no transport_headers_or_collective_algorithm_bytes");
     const char *omp_threads = std::getenv("OMP_NUM_THREADS");
     profiler.add_metadata("omp_num_threads", omp_threads ? omp_threads : "unset");
 
@@ -250,8 +302,8 @@ int main(int argc, char **argv) {
                     "实验名称 : " << profile_experiment << endl <<
                     "重复编号 : " << profile_repeat << endl <<
                     "仅核心算法 : " << (profile_core_only ? "是" : "否") << endl <<
-                    "通信图明细 : " << (profile_comm_graph ? "开启" : "关闭") << endl <<
-                    "硬件缓存计数 : " << (profile_cache ? "请求" : "关闭") << endl;
+                    "算法 : " << mesh_research::options().algorithm << endl <<
+                    "前置同步诊断 : " << (profile_split ? "开启" : "关闭") << endl;
         }
 
 
@@ -430,6 +482,7 @@ int main(int argc, char **argv) {
 
     // double Coarse_endTime = clock();
     double Coarse_endTime = MPI_Wtime();
+    profiler.begin_core();
     double Coarse_Time = (double)(Coarse_endTime - startTime);
 
 
@@ -475,7 +528,7 @@ int main(int argc, char **argv) {
         idx_t *edest = nullptr;
         {
             scaling::StageScope profile_stage("metis_partition", "compute");
-            edest = PartitionMesh(occ_mesh, numParts);
+            edest = PartitionResearchMesh(occ_mesh, numParts);
         }
 
         //MPI_Barrier(MPI_COMM_WORLD);
@@ -483,7 +536,10 @@ int main(int argc, char **argv) {
         time[0] = double(currtime0 - Coarse_endTime);//NewSubmesh + PartitionMesh 等细化前准备/分区
 
         //遍历本进程负责的体单元，抽取四个面并记录面朝向/所属分区/域信息；然后 MPI_Allgatherv 全量汇总并合并成全局 facemap，区分内部面和分区交界面
-        ExtractPartitionSurfaceMesh(occ_mesh, edest, facemap, time_part1_detail);
+        {
+            scaling::StageScope phase("face_pipeline_total", "algorithm");
+            ExtractPartitionSurfaceMesh(occ_mesh, edest, facemap, time_part1_detail);
+        }
         //MPI_Barrier(MPI_COMM_WORLD);
         double currtime1 = MPI_Wtime();
         time[1] = double(currtime1 - currtime0);
@@ -761,6 +817,7 @@ int main(int argc, char **argv) {
                 fflush(stdout);
             }
 
+            profiler.set_total_elapsed(MPI_Wtime()-Coarse_endTime);
             const int local_points_after_adjacency = nglib::Ng_GetNP(submesh);
             const int local_surface_elements_after_adjacency = nglib::Ng_GetNSE(submesh);
             const int local_volume_elements_after_adjacency = nglib::Ng_GetNE(submesh);
@@ -799,6 +856,7 @@ int main(int argc, char **argv) {
         }
 
         if (!isComputeAdj) {
+            profiler.set_total_elapsed(MPI_Wtime()-Coarse_endTime);
             profiler.set_metric("local_points_after_adjacency", nglib::Ng_GetNP(submesh));
             profiler.set_metric("local_surface_elements_after_adjacency", nglib::Ng_GetNSE(submesh));
             profiler.set_metric("local_volume_elements_after_adjacency", nglib::Ng_GetNE(submesh));
@@ -806,6 +864,7 @@ int main(int argc, char **argv) {
             profiler.set_metric("ghost_volume_elements_added", 0.0);
         }
 
+        std::free(edest);
         double endTime = MPI_Wtime();
         double Fine_Time = (double)(endTime - Coarse_endTime);
         double runtime = (double)(endTime - startTime);
@@ -893,7 +952,6 @@ int main(int argc, char **argv) {
     }
 
     if(id == 0) cout << "successful!!!" << endl;
-    profiler.set_total_elapsed(MPI_Wtime() - startTime);
     profiler.finalize();
     netgen_mpi_checkpoint(MPI_COMM_WORLD, "MPI_Finalize.begin");
     MPI_Finalize();

@@ -1,289 +1,85 @@
-# Strong scaling profiler（强扩展瓶颈分析）
+# 两个瓶颈的算法实验
 
-这套工具在固定 STEP（三维模型交换格式）输入和固定网格参数下，随 MPI（消息传递接口）进程数增加，统一测量：
+新分支：`agent/dependency-aware-mesh-balance`。原采集分支保持不变。
 
-- 端到端时间、加速比和并行效率；
-- 集合通信、点对点通信、同步等待、消息数和应用层通信字节数；
-- 各进程局部网格规模及最大值/平均值负载不均衡；
-- CPU cache（处理器缓存）访问、未命中、IPC（每周期指令数）；
-- 页故障、逻辑/物理存储读写量、STEP 读取及结果写出的 I/O（输入/输出）时间；
-- 每个进程的主机名、峰值 RSS（常驻内存集）、CPU/缓存拓扑、模块和动态库环境。
+实现及文献说明：[算法设计](../docs/algorithm_design.md)。代码是待集群验证的研究实现，尚无新算法加速比结论。
 
-## 1. 与现有集群脚本的对应关系
+## 四组消融
 
-`cluster_env.sh` 统一了根目录新增脚本中的有效配置：
+| ALGORITHMS（算法列表）取值 | 分区修正 | 面交换 |
+|---|---|---|
+| `baseline`（原算法对照） | 关闭 | 全收集 |
+| `balance`（仅均衡） | 开启 | 全收集 |
+| `sparse`（仅稀疏通信） | 关闭 | 面匹配与顶点依赖闭包 |
+| `combined`（组合） | 开启 | 面匹配与顶点依赖闭包 |
 
-| 原脚本约定 | 强扩展脚本中的默认值 |
-|---|---|
-| `module purge; module load mpich/mpi-x` | `MPI_MODULE=mpich/mpi-x` |
-| GCC 12 和 MPICH wrapper | `GCCHOME`、`MPICH_CC`、`MPICH_CXX` |
-| 系统 AArch64、Netgen、本地库路径 | 统一由 `cluster_env.sh` 设置，不继承登录节点的动态库路径 |
-| `yhrun --mpi=pmix` | `LAUNCHER=yhrun`、`LAUNCHER_EXTRA_ARGS=--mpi=pmix` |
-| `mt_module` 分区 | `PARTITION=mt_module` |
-| 每节点/每任务 1 个进程和线程 | `RANKS_PER_NODE=1`、`OMP_NUM_THREADS=1` |
-| `wholewall3solid.STEP` | `<当前仓库>/inputData/wholewall3solid.STEP` |
-| 当前强扩展参数 | `LEVELS=2`、`REFINES=2` |
-| `maxh=1000, minh=0` | `MAXH=1000.0`、`MINH=0.0` |
+主程序默认 `baseline`。四组使用相同的种子分区/广播和简化采集；请以本分支对照衡量算法增量。历史采集结果及原分支未修改。
 
-仓库目录不再硬编码为 `test_code_time`：编译、可执行文件、输入和结果路径均从当前 checkout（检出的仓库）自动推导。第三方库路径仍保留集群上的现有默认值，需要时可通过同名环境变量覆盖。
+## 构建与小规模正确性检查
 
-运行环境以已验证的 `test_code_part03/cjz_nodsp_copy.sh` 为基准。`LD_LIBRARY_PATH` 会被设置为确定值，不会继承提交节点中的旧 MPI/PMIx 路径；尤其不得加入 `/vol8/home/hnu_lhz/cjz/aarch64-linux-gnu`，否则会混用该目录下的 `libpmix.so.2` 与 MPI-X 的 `libmpi.so.12`。计算作业会在启动 `yhrun` 前用 `ldd` 验证二者来源。
-
-### 1.1 “分区数”到底指什么
-
-这里有三个容易混淆、但含义完全不同的数量：
-
-| 名称 | 当前代码中的关系 | 含义 |
-|---|---:|---|
-| Slurm 分区 `PARTITION=mt_module` | 与网格分区无关 | 调度系统中的队列/资源池名称 |
-| 计算节点数 | `ceil(P / RANKS_PER_NODE)` | 这次作业实际申请的物理节点数 |
-| 网格分区数 `numParts` | **等于总 MPI 进程数 P** | METIS（图划分库）生成的计算子域数 |
-
-当前 `occmesh_MPI_main.cpp` 明确执行 `numParts = p`，其中 `p` 是 `MPI_COMM_WORLD` 的进程总数；随后 rank（进程）`id` 处理分区 `id`。因此当前实现是“一进程一网格分区”，不是“一节点一分区”。例如 `RANKS_PER_NODE=16` 时：
-
-| MPI 进程数 P | 节点数 | 网格分区数 |
-|---:|---:|---:|
-| 1024 | 64 | 1024 |
-| 2048 | 128 | 2048 |
-| 4096 | 256 | 4096 |
-| 8192 | 512 | 8192 |
-
-网格分区数目前不能通过脚本独立设置。若令 `numParts != P`，现有代码中“rank 编号就是分区编号”的假设会失效，需要新增 rank 与分区的映射，并支持一个 rank 处理多个分区或多个 rank 协作一个分区；这不是增加一个环境变量就能正确完成的改动。当前验证强扩展瓶颈不需要先做这种重构：保持每节点进程数不变，只改变 P，就能观察分区增多时边界、副本、负载和等待如何变化。
-
-## 2. 编译插桩版本
-
-在登录节点执行：
+在新分支当前目录运行原名称的构建脚本。脚本使用当前目录，不会跳回硬编码的另一个检出目录。已有默认安装目录名称保持不变。
 
 ```bash
+git fetch origin
+git switch agent/dependency-aware-mesh-balance
 bash build_project.sh
+
+# 先在已分配的计算资源中运行算法测试
+MPI_LAUNCHER=yhrun MPI_EXTRA_ARGS='--mpi=pmix' \
+TEST_PROCESS_COUNTS='1 2 3 4 8' bash tests/run_tests.sh
+
+# 小规模网格验证，不开启性能采集
+mkdir -p result/check_sparse
+yhrun --mpi=pmix -n 16 ./build/mesh_occ_mpi/mesh_occ_mpi \
+  -i inputData/wholewall3solid.STEP -l 1 -r 1 -adj -v \
+  --algorithm sparse --verify-faces -o result/check_sparse/
 ```
 
-这是仓库中现有的编译入口，会加载 MPI-X/GCC 12 环境，重新创建 `build/`，执行 CMake、编译并安装。因为本次修改包含 C++ 插桩，不重新编译就不会产生新增指标。集群路径变化时，应先在 `build_project.sh` 中同步修改 `PROJ_DIR`、`GCCHOME` 和 `LOCAL_LIB`。
+`--verify-faces` 会实际运行原全收集作为参考，逐项比较面记录及共享顶点/边/面的进程集合；因此仅用于小规模验证，不能和性能采集同时使用。该检查通过后仍需比较完整输出。均衡方案另检查几何边界、单元规模和网格质量。
 
-## 3. 提交强扩展实验
+当前编号格式仍是32位；全局点号或单元号超过约21.47亿会明确退出。更大规模正确性运行需要先完成全系统64位编号改造，不能只扩大计数变量。
 
-### 3.1 先检查提交命令
-
-`DRY_RUN=1` 只生成计划并打印 `yhbatch` 命令，不提交作业：
+## 一次提交四组实验
 
 ```bash
-DRY_RUN=1 bash strong_scaling/submit_experiments.sh
+ALGORITHMS='baseline balance sparse combined' \
+TIMING_MODES='natural split' \
+PROCESS_COUNTS='16 32 64' \
+RANKS_PER_NODE=16 REPEATS=5 WARMUPS=1 \
+LEVELS=1 REFINES=1 \
+INPUT_PATH=/实际路径/wholewall3solid.STEP \
+bash strong_scaling/submit_experiments.sh
 ```
 
-主入口仍是原来的 `strong_scaling/submit_experiments.sh`。默认规模和每节点进程数以脚本顶部配置为准，每个规模重复 6 次。提交脚本为每个 P 申请一个独立 Slurm 作业，所有 P 之间没有依赖，可以并行运行；但用递增的 `--begin` 设置统一启动间隔，避免所有作业在同一时刻集中读取输入文件。某个 P 失败不会阻塞其他 P。同一 P 的所有模式和 cold/warm（冷/热缓存）重复保留在同一个 allocation（资源分配）中，保证使用相同节点；某次重复失败后会继续剩余重复，最后仍生成包含失败/缺失项的统一报告。
+`submit_suite.sh`（套件提交入口）仍可作为同一脚本的兼容入口。
 
-### 3.2 推荐：一次提交完整实验套件
+- `natural`（自然运行）：用于性能对比；集合调用内可能含到达等待。
+- `split`（等待/执行拆分）：四组一致添加前置屏障，用于归因；不能与自然运行数据混合。
+- `REPEATS=5`（正式重复5次）、`WARMUPS=1`（先预热1次）；预热编号为0，不计入汇总。
+- 不需要设置原来的 `CORE_ONLY`、`CACHE_COUNTERS` 或 `EXPERIMENT`（核心开关、缓存计数、实验名称）。新运行器始终采集核心阶段。
+- 每个进程规模独立提交，统一最早启动时刻；没有作业串行依赖。相同规模内按轮次轮换算法顺序。
+- 失败运行记录退出码，并继续后面的算法/重复；作业结束仍返回失败状态。再次使用相同 `RUN_ROOT`（结果目录）会跳过成功运行、重试失败运行。
+- 更改二进制、输入、算法列表、重复次数或模型参数时，选择新结果目录；脚本不把旧配置结果混入新实验。
+
+可选变量：`BALANCE_SWEEPS=4`（修正轮数）、`CUT_GROWTH=0.05`（切分面增长上限）、`COST_WEIGHTS=1,1,1,1`（四阶段代理权重）、`START_DELAY_SECONDS=120`（所有作业相同的启动延时）、`TIMEOUT_SECONDS=7200`（单次运行超时）、`DRY_RUN=1`（仅打印提交命令）。
+
+大规模进程列表由用户显式指定；先确认全局编号容量和小规模正确性，再扩大资源。`cluster_env.sh`（集群环境脚本）保留原已验证的 MPI-X 与 PMIx（集群进程管理接口）设置。
+
+## 汇总
+
+每个作业结束自动分析本进程规模。全部作业结束后：
 
 ```bash
-SUITE_MODES="core_timing core_cache full_io" \
-  bash strong_scaling/submit_experiments.sh
+python3 strong_scaling/analyze_results.py /完整实验结果目录
 ```
 
-这一个命令会为每个 P 提交一个独立作业；每个 P 作业内部依次运行：
+输出在 `analysis`（分析目录）：
 
-1. `core_timing`：核心路径计时、通信和并行效率，不启用硬件计数器；
-2. `core_cache`：相同核心路径并启用 CPU（中央处理器）硬件缓存计数；
-3. `full_io`：完整结果写出和 I/O（输入/输出）计时。
+- `runs.csv`（各次正式运行）：直接测量的核心时间、面处理时间、等待、不均衡、通信量、实际单元规模、模型相关性。
+- `stages.csv`（各阶段）：逐次最大/平均时间，便于定位不均衡来自哪一步。
+- `summary.csv`（汇总）：重复实验中位数、变异系数、相同进程数与计时模式下相对对照的加速比。
+- `issues.txt`（异常）：失败、缺失或不完整记录，不静默当成成功结果。
 
-可选的 `comm_graph`（通信图诊断）模式仍走核心路径，但额外保存逐 rank 的出/入邻居集合和逐边消息量。它不启用硬件缓存计数；明细汇聚和 CSV 写出发生在应用总时间确定之后。为使主曲线与历史数据口径完全一致，默认套件不自动加入该模式，建议针对临界规模单独运行。
+检查时先看自然运行核心时间，再看拆分等待、三轮稀疏通信总成本及分区修正开销。预测代价下降并不保证真实时间下降。跨进程数/划分模式若实际网格数量变化，不直接套用固定工作量强扩展效率。
 
-不同 P 作业可以互相重叠运行，但最早启动时间依次错开。默认间隔为 120 秒，例如 P 序列中的第 1、2、3 个作业分别在提交后 0、120、240 秒具备启动资格。三种模式仍分开执行，避免硬件计数器或结果写出污染主计时。一次提交执行哪些模式可自由选择，也接受逗号分隔，例如：
-
-```bash
-SUITE_MODES="core_timing,full_io" \
-  bash strong_scaling/submit_experiments.sh
-```
-
-`submit_suite.sh` 保留为兼容入口，内部仍转到 `submit_experiments.sh`，无需更换已有脚本名称。
-
-每种模式默认重复 6 次：第 1 次运行前，会在各计算节点通过 `POSIX_FADV_DONTNEED` 请求丢弃输入文件、可执行文件和动态库的 OS（操作系统）页缓存，标为 cold（冷缓存）；第 2–6 次不清理，作为 5 个 warm（热缓存）样本，报告取中位数。该接口只是无特权的内核提示，是否真正形成冷启动要结合报告中的 `PhysR`（物理读取量）判断。
-
-“一次提交”不是只执行一次程序：冷/热对照至少需要两次运行，而核心路径和完整 I/O 也必须分开，否则结果写出会污染通信计时。
-
-### 3.3 常用参数
-
-| 变量 | 默认值 | 含义 |
-|---|---:|---|
-| `PROCESS_COUNTS` | `1 8 16 32 64 128 256 512 1024 2048 4096` | MPI 进程数序列 |
-| `REPEATS` | `6` | 每个规模的重复次数：1 次 cold + 5 次 warm |
-| `RANKS_PER_NODE` | `16` | 每节点 MPI 进程数 |
-| `PARTITION` | `mt_module` | Slurm 分区 |
-| `LAUNCHER_EXTRA_ARGS` | `--mpi=pmix` | `yhrun` 的附加参数 |
-| `CPU_BIND` | `cores` | 将 rank（进程）绑定到 CPU 核；若该集群不接受此参数，设为 `none` |
-| `SUITE_MODE` | `1` | `1` 执行自定义模式套件；设为 `0` 可兼容原来的单模式调用 |
-| `CORE_ONLY` | 套件按模式设置 | 单模式时，`1` 跳过普通结果写出，`0` 测完整 I/O |
-| `CACHE_COUNTERS` | 套件按模式设置 | 单模式时是否采集硬件缓存计数 |
-| `COMM_GRAPH` | 套件按模式设置 | 单模式时是否保存逐 rank/逐边通信图明细；主计时实验保持 `0` |
-| `START_INTERVAL_SECONDS` | `120` | 相邻 P 作业的最早启动时间间隔；`0` 表示同时具备启动资格 |
-| `SERIALIZE_JOBS` | `0` | 默认 `0`，P 作业独立并可并行；设为 `1` 才启用旧的 `afterany` 串行方式 |
-| `SUITE_MODES` | `core_timing core_cache full_io` | 一次提交包含的模式，可用空格或逗号分隔 |
-| `PAGE_CACHE_POLICY` | `evict-first` | 每种模式的第 1 次运行前请求清理文件页缓存；`observe` 只观察首次运行 |
-| `PAGE_CACHE_STRICT` | `0` | 清缓存提示失败时是否立即终止；默认继续并把该次标为候选冷启动 |
-| `LEVELS` / `REFINES` | `2` / `2` | 表面和体网格细化次数 |
-| `MAXH` / `MINH` | `1000.0` / `0.0` | 网格尺度参数 |
-| `SBATCH_EXTRA_ARGS` | 空 | 账号、时限或集群允许的 `--exclusive` 等提交参数 |
-| `OUTPUT_ROOT` | `<仓库>/strong_scaling_results` | 所有实验结果根目录 |
-| `BATCH_ID` | 当前时间 | 区分不同批次，防止覆盖或混合数据 |
-
-例如每节点运行 4 个进程并指定作业时限：
-
-```bash
-RANKS_PER_NODE=4 SBATCH_EXTRA_ARGS="--time=02:00:00" \
-  bash strong_scaling/submit_experiments.sh
-```
-
-例如将相邻作业启动间隔改为 3 分钟：
-
-```bash
-START_INTERVAL_SECONDS=180 \
-SUITE_MODES="core_timing core_cache full_io" \
-  bash strong_scaling/submit_experiments.sh
-```
-
-针对 256--512 rank 的通信问题，推荐先做独立诊断批次：
-
-```bash
-PROCESS_COUNTS="256 384 448 512" \
-RANKS_PER_NODE=16 REPEATS=3 \
-LEVELS=2 REFINES=3 \
-EXPERIMENT=adjacency_comm_graph \
-SUITE_MODES="comm_graph" \
-  bash strong_scaling/submit_experiments.sh
-```
-
-### 3.4 验证负载不均衡与分区冗余的最小实验
-
-重新编译最新插桩后，只改变 MPI 进程数；输入模型、网格参数、每节点进程数和绑核方式必须固定：
-
-```bash
-PROCESS_COUNTS="1024 2048 4096 8192" \
-RANKS_PER_NODE=16 REPEATS=6 \
-LEVELS=3 REFINES=3 \
-START_INTERVAL_SECONDS=120 \
-EXPERIMENT=partition_redundancy_validation \
-SUITE_MODES="comm_graph" \
-  bash strong_scaling/submit_experiments.sh
-```
-
-各 P 是相互独立、可并行的 Slurm 作业；`START_INTERVAL_SECONDS=120` 只统一错开最早启动时间，不建立作业依赖。每个 P 的第 1 次是 cold（冷缓存）候选，第 2--6 次是 warm（热缓存）样本，最终使用 warm 中位数判断趋势。
-
-本次新增的逐 rank 指标会自动汇总到 `modes/comm_graph/analysis/`：
-
-| 输出 | 验证内容 |
-|---|---|
-| `decomposition_report.txt` | 首先阅读；把分区边界、副本倍数、负载不均衡和等待相关性放在一张表中 |
-| `decomposition_summary.csv` | 每个 P 对多次重复取中位数后的绘图数据 |
-| `decomposition_runs.csv` | 每次重复的数据，用于检查实验抖动 |
-| `communication_summary.csv` | 邻居数、消息量、Alltoall（全互换）和 Waitall（等待全部完成）的尾部时间 |
-
-两项假设按以下组合证据判断：
-
-1. 负载不均衡：`volume_imbalance_max_over_avg` 随 P 增大；同时 `volume_elements_vs_local_mesh_time_pearson > 0` 且 `volume_elements_vs_vertex_wait_pearson < 0`。这表示单元较多的 rank 计算更久，而单元较少、较早到达的 rank 等待更久。
-2. 分区冗余：`partition_boundary_faces`、`vertex_copy_factor` 或 `volume_copy_factor_after_adjacency` 随 P 增大，并伴随邻居数、消息量或通信时间上升。前者测量应用层副本，后者判断这些副本是否真正转化为通信代价。
-
-不要在同一条强扩展曲线内改变 `LEVELS`、`REFINES`、`MAXH`、`MINH` 或 `RANKS_PER_NODE`，否则问题规模或节点布局也会变化，无法把趋势归因于 P/分区数。若要进一步区分“节点数”与“MPI/网格分区数”的影响，可另做固定 P、只改变 `RANKS_PER_NODE` 的对照批次；它是第二阶段实验，不属于上述最小验证集。
-
-如果已经处于一个覆盖所需节点数的 allocation（资源分配）中，也可以直接运行单模式：
-
-```bash
-PROCESS_COUNTS="256 384 448 512" \
-RANKS_PER_NODE=16 REPEATS=3 \
-LEVELS=2 REFINES=3 CORE_ONLY=1 \
-CACHE_COUNTERS=0 COMM_GRAPH=1 \
-EXPERIMENT=adjacency_comm_graph \
-  bash strong_scaling/run_experiments.sh
-```
-
-## 4. 已有 allocation 中直接运行
-
-若已通过 `sbatch`/交互命令取得足够资源，可直接运行：
-
-```bash
-PROCESS_COUNTS="16 32 64" REPEATS=3 \
-EXPERIMENT=wholewall_l4_r3_debug \
-  bash strong_scaling/run_experiments.sh
-```
-
-只检查最终 `yhrun` 和应用参数、不执行程序：
-
-```bash
-LOAD_CLUSTER_ENV=0 DRY_RUN=1 \
-MESH_EXECUTABLE=/path/to/mesh_occ_mpi INPUT_MESH=/path/to/model.STEP \
-PROCESS_COUNTS="16 32" REPEATS=1 \
-  bash strong_scaling/run_experiments.sh
-```
-
-## 5. 统一结果目录
-
-统一套件每次提交生成独立的 `<EXPERIMENT>_<BATCH_ID>` 目录：
-
-```text
-strong_scaling_results/
-└── strong_scaling_suite_YYYYMMDD-HHMMSS/
-    ├── run_plan.txt                 # 参数、规模与 Slurm 作业号
-    ├── scheduler_logs/              # sbatch 标准输出/错误
-    ├── mode_status/                 # 每个 P、每种模式的完成状态
-    ├── modes/
-    │   ├── core_timing/             # 无硬件计数器的主计时曲线
-    │   ├── core_cache/              # 核心路径和硬件缓存
-    │   │   ├── environment/         # CPU/cache、模块、动态库和 git 提交
-    │   │   ├── commands/            # 每次运行的完整可复现命令
-    │   │   ├── launcher_logs/       # 每次 yhrun 的程序输出
-    │   │   ├── page_cache_logs/     # 第 1 次运行前的页缓存准备日志
-    │   │   ├── status/              # 含 cold/warm 状态、退出码和墙钟时间
-    │   │   ├── p00016/              # profiler（性能分析器）原始结果
-    │   │   └── analysis/            # 该模式的详细阶段报告
-    │   └── full_io/                 # 相同结构；另含普通网格输出
-    └── analysis/
-        ├── suite_report.txt         # 首先阅读：热缓存主曲线与冷/热对照
-        ├── suite_summary.csv        # 核心、cache、I/O 的统一绘图数据
-        ├── suite_status.csv         # 每个 P/模式的完成、失败或缺失状态
-        └── mode_analysis_status.tsv # 各模式汇总脚本状态
-```
-
-`comm_graph` 的每次运行目录还包含：
-
-| 文件 | 内容 |
-|---|---|
-| `rank_metrics.csv` | 每个 rank 的 `num_s`/`num_r`、消息元素数、精确 `MPI_Waitall` 时间等标量 |
-| `stages.csv` | 各阶段跨 rank 的 P50/P95/P99/Max、邻居数和消息字节分位数 |
-| `communication_peers.csv` | 逐 rank 的出/入邻居集合、只出/只入邻居及逐邻居元素数 |
-| `communication_edges.csv` | 逐有向边的发送端/接收端观察值与计数一致性 |
-| `communication_graph_summary.csv` | \(|E|/[P(P-1)]\) 有向图密度、稀疏度和不对称统计 |
-| `analysis/communication_report.txt` | 多次重复取中位数后的可读通信诊断报告 |
-| `analysis/communication_summary.csv` | 可直接绘图或写入论文表格的汇总数据 |
-
-这样每批数据、运行环境、命令、日志和分析都在同一个目录中；后续只需提供该目录，即可直接读取并比较瓶颈。
-
-## 6. 单独重新汇总
-
-如果汇总作业未运行，或后来补跑了某个规模：
-
-```bash
-python3 strong_scaling/analyze_results.py \
-  strong_scaling_results/<RUN_NAME>
-```
-
-加速比和并行效率以最小已测进程数 \(P_0\) 为基准：
-
-\[
-S(P)=\frac{T(P_0)}{T(P)},\qquad
-E(P)=\frac{S(P)}{P/P_0}\times100\%.
-\]
-
-## 7. 指标解释与注意事项
-
-- `--profile-core-only` 保留网格生成、全局编号和邻接通信，跳过普通网格结果写出、质量评价和旧版计时文件；因此适合分析算法与通信扩展性。
-- `--profile-comm-graph` 才会保存完整邻居集合；关闭时仍采集低开销的 `num_s`、`num_r`、消息量、`MPI_Alltoall` 和 `MPI_Waitall` 分位数。通信图明细在 `total_wall_seconds` 固定后汇聚，因此不会计入报告中的端到端时间，但本地邻居列表复制仍只建议在专用诊断批次使用。
-- 图密度按有向非自环图定义为 \(|E|/[P(P-1)]\)，零边稀疏度为 \(1-|E|/[P(P-1)]\)。出邻居集合与入邻居集合不同不一定是错误；`communication_edges.csv` 中发送/接收计数不匹配才直接指向通信描述不一致。
-- `volume_size_exchange_pre_collective_wait` 是进入 `MPI_Alltoall` 前的到达差；`volume_size_exchange` 是对齐后的 Alltoall 执行；`volume_waitall_seconds` 是体单元非阻塞收发中 `MPI_Waitall` 本身的时间。三者应分开解释。
-- Linux `perf_event_open` 负责 cache references/misses、cycles、instructions 和 IPC。若 `perf_event_paranoid` 权限不足，程序仍会完成并将缓存指标标为 `N/A`。
-- 通用 `cache-references`/`cache-misses` 的精确定义随 CPU 型号变化，只应在相同节点型号、相同绑核方式下横向比较。
-- `Profile coverage`（计时覆盖率）之外的时间列为 `unprofiled`（未细分），可用于发现尚未插桩的路径。
-- 所有模式共用同一套集合通信插桩：每次应用层集合通信前增加一个 profiling 专用 `MPI_Barrier`，其时间报告为 `Wait`（到达等待）；随后原集合通信调用报告为 `Comm`（对齐后的通信执行）。因此 `Comm(%)` 不再把到达等待相加。
-- `Comm` 不是纯网络传输时间：它仍包含 MPI 集合算法、协议、内存复制等开销；点对点通信阶段也计入 `Comm`，其中阻塞式调用仍可能包含对端就绪等待。前置 Barrier 只在启用 profiler 时执行。
-- 通信字节数是应用层缓冲区规模，不等同于网络链路上的实际流量；集合通信接收量包含本进程贡献。
-- `/proc/self/io` 用于区分逻辑和物理 I/O。逻辑读写量大、物理读写量小，通常表示页缓存或延迟写回生效。
-- 主强扩展曲线只使用 warm（第 2 次及以后）的中位数；cold（第 1 次）单列，二者不再混合计算中位数或变异系数。
-- 不同 P 默认并行、错峰启动，可以减少同一时刻集中读取输入文件，但不能消除后续运行阶段之间或其他用户产生的共享文件系统竞争；应同时保留作业时间、节点和调度日志。
-- `all_runs.csv` 和 `CV(%)`（变异系数）用于判断重复实验抖动；抖动大时不要只看中位数，应检查 `scheduler_logs/`、节点列表和逐 rank 数据。
+已移除：硬件缓存计数、页缓存干预、逐边通信图导出及其专用套件分析；保留与两项算法相关的阶段计时、必要通信指标、失败恢复及针对性正确性测试。历史结果目录内容保留。

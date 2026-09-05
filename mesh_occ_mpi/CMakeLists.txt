@@ -1,4 +1,4 @@
-ADD_EXECUTABLE(mesh_occ_mpi occmesh_MPI_main.cpp 3DNgmesher.cpp scaling_profiler.cpp)
+ADD_EXECUTABLE(mesh_occ_mpi occmesh_MPI_main.cpp 3DNgmesher.cpp scaling_profiler.cpp research_mesh.cpp)
 
 TARGET_LINK_LIBRARIES(mesh_occ_mpi libnglib.so)
 
