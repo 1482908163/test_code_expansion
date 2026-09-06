@@ -50,7 +50,7 @@ out=pathlib.Path(value('--profile-dir'))
         f.write("\n# --algorithm research_1 global_id_bits\n")
     source = tmp/'input.step'
     source.write_text('mock')
-    env = os.environ | dict(LOAD_MODULES='0', CLUSTER_ENV_STRICT='0', PROCESS_COUNT='1',
+    env = dict(os.environ, LOAD_MODULES='0', CLUSTER_ENV_STRICT='0', PROCESS_COUNT='1',
         RUN_ROOT=str(tmp/'results'), BINARY=str(binary), INPUT_PATH=str(source),
         ALGORITHMS='baseline sparse', TIMING_MODES='natural', REPEATS='1', WARMUPS='1',
         MPI_LAUNCHER=str(launcher), MPI_EXTRA_ARGS=' ', START_EPOCH='0', VERIFY_FACES='0',
@@ -79,6 +79,10 @@ out=pathlib.Path(value('--profile-dir'))
     assert (failed/'mesh/volfined/volfined0.vol').exists() and (failed/'run.log').exists()
     runs=list(csv.DictReader((pdir/'analysis/runs.csv').open()))
     assert len(runs)==1 and runs[0]['repeat']=='1' and runs[0]['algorithm']=='sparse'
+    stages=list(csv.DictReader((pdir/'analysis/stages.csv').open()))
+    assert len(stages)==1
+    assert stages[0]['algorithm']=='sparse' and stages[0]['repeat']=='1'
+    assert stages[0]['stage']=='face_pipeline_total'
     assert 'Failed run (exit 9)' in (pdir/'analysis/issues.txt').read_text()
     overview=(pdir/'RESULT_SUMMARY.txt').read_text()
     assert '不完整，不可直接比较' in overview and '1 / 2' in overview
@@ -94,7 +98,7 @@ out=pathlib.Path(value('--profile-dir'))
     assert repeat_analysis.returncode==0 and (pdir/'analysis/summary.csv').read_bytes()==csv_before
 
     # Opt-out retains all artifacts; later analysis can reclaim them identically.
-    kept_env=env | dict(RUN_ROOT=str(tmp/'kept_results'), CLEANUP_RESULTS='0')
+    kept_env=dict(env, RUN_ROOT=str(tmp/'kept_results'), CLEANUP_RESULTS='0')
     kept=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=kept_env,capture_output=True,text=True)
     assert kept.returncode==1, kept.stderr
     kept_pdir=tmp/'kept_results/p1'
@@ -156,7 +160,7 @@ out=pathlib.Path(value('--profile-dir'))
 
     # A stale executable is rejected before any expensive mesh run starts.
     stale=tmp/'stale_mesh';stale.write_text('#!/bin/sh\nexit 0\n');stale.chmod(0o755)
-    stale_env=env | dict(RUN_ROOT=str(tmp/'stale_results'), BINARY=str(stale))
+    stale_env=dict(env, RUN_ROOT=str(tmp/'stale_results'), BINARY=str(stale))
     stale_result=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=stale_env,
                                 capture_output=True,text=True)
     assert stale_result.returncode==2 and 'stale/incompatible' in stale_result.stderr
@@ -167,7 +171,7 @@ out=pathlib.Path(value('--profile-dir'))
     no_profile=tmp/'no_profile_mesh'
     no_profile.write_text('#!/bin/sh\n# --profile-core-only --algorithm research_1 global_id_bits\nexit 0\n')
     no_profile.chmod(0o755)
-    no_profile_env=env | dict(RUN_ROOT=str(tmp/'no_profile_results'), BINARY=str(no_profile),
+    no_profile_env=dict(env, RUN_ROOT=str(tmp/'no_profile_results'), BINARY=str(no_profile),
         ALGORITHMS='baseline sparse', TIMING_MODES='natural', REPEATS='2', WARMUPS='0')
     missing=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=no_profile_env,
                            capture_output=True,text=True)
@@ -179,7 +183,7 @@ out=pathlib.Path(value('--profile-dir'))
 
     # The public entry submits all configured scales; no parameters are required
     # on its command line. Direct calls to the compatibility entry behave alike.
-    submit_base=os.environ | dict(EXPERIMENT_PRESET='pilot', PROCESS_COUNTS='16 32 64',
+    submit_base=dict(os.environ, EXPERIMENT_PRESET='pilot', PROCESS_COUNTS='16 32 64',
         RUN_ROOT=str(tmp/'submitted'), DRY_RUN='1', RANKS_PER_NODE='16',
         START_EPOCH='1', SBATCH_COMMAND='yhbatch')
     for entry in ('run_experiments.sh','submit_experiments.sh'):

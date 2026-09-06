@@ -1,2 +1,0 @@
-processes	nodes	repeat	cache_state	state	exit_code	runtime_s	log
-1024	64	3	warm	COMPLETED	0	50	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/strong_scaling_suite_pp16_20260813-042903/modes/core_timing/launcher_logs/p01024_repeat_03.log

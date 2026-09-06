@@ -1,0 +1,25 @@
+2048
+baseline balance sparse combined
+natural split
+5
+1
+-i
+/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+-l
+3
+-r
+3
+--maxh
+1000
+--minh
+0
+-adj
+--balance-sweeps
+4
+--cut-growth
+0.05
+--cost-weights
+1,1,1,1
+OMP_NUM_THREADS=1
+f522008bdccef76a929f1166d903d773a4aa1e6749a7c73be32cbf8c679ffb3a  /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/build/mesh_occ_mpi/mesh_occ_mpi
+8193db1235a9d0dc24d19dd3b9a4dafccfe62d6667ab5a395f72b30a02339547  /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP

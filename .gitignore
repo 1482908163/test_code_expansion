@@ -21,8 +21,19 @@ __pycache__/
 # 网格和应用输出，通常最大
 strong_scaling_results/**/application_output/
 
-# 每个进程规模的逐 rank 原始测量数据
-strong_scaling_results/**/p[0-9]*/
+# 每次重复实验的逐-rank 原始数据体积很大；上传 analysis/*.csv 即可分析。
+strong_scaling_results/**/rank_profiles.jsonl
+strong_scaling_results/**/rank_profiles.jsonl.gz
+
+# 单次运行日志和状态哨兵只用于集群现场排错。
+strong_scaling_results/**/run.log.gz
+strong_scaling_results/**/.run.lock
+strong_scaling_results/**/RUNNING
+strong_scaling_results/**/SUCCESS
+
+# 网格、划分和正确性验证输出可由同一配置重新生成。
+strong_scaling_results/**/mesh/
+strong_scaling_results/**/verify_*/
 
 # 启动器、调度器和页缓存日志
 strong_scaling_results/**/launcher_logs/

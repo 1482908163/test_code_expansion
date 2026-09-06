@@ -264,7 +264,9 @@ def main():
                 continue  # Explicit warmups; no subtraction/estimated timing.
             runs.append(result)
             for detail in details:
-                stage_rows.append({k: result[k] for k in ("algorithm", "timing", "ranks", "repeat")} | detail)
+                identity = {k: result[k] for k in ("algorithm", "timing", "ranks", "repeat")}
+                identity.update(detail)
+                stage_rows.append(identity)
         except (OSError, EOFError, ValueError, KeyError, TypeError) as error:
             errors.append(f"{directory}: {error}")
     present_runs = {(r["algorithm"], r["timing"], r["ranks"], r["repeat"]) for r in runs}
