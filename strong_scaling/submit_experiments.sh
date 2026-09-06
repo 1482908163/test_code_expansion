@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+invoked_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="${STRONG_SCALING_DIR:-${invoked_script_dir}}"
+SCRIPT_DIR="$(cd "${SCRIPT_DIR}" && pwd)"
+export STRONG_SCALING_DIR="${SCRIPT_DIR}"
+
+# Compatibility: direct calls enter the same unified configuration first.
+if [[ "${MESH_EXPERIMENT_DRIVER_READY:-0}" != 1 ]]; then
+    exec "${SCRIPT_DIR}/run_experiments.sh" "$@"
+fi
+
 REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export RUN_ROOT="${RUN_ROOT:-${REPOSITORY_ROOT}/strong_scaling_results/mesh_algorithms_$(date +%Y%m%d-%H%M%S)}"
-export RANKS_PER_NODE="${RANKS_PER_NODE:-16}"
-export START_EPOCH="${START_EPOCH:-$(( $(date +%s)+${START_DELAY_SECONDS:-120} ))}"
-PROCESS_COUNTS="${PROCESS_COUNTS:-16 32 64}"
-SBATCH_COMMAND="${SBATCH_COMMAND:-yhbatch}"
-PARTITION="${PARTITION:-mt_module}"
-DRY_RUN="${DRY_RUN:-0}"
-# Start with a small scale; request the production process counts explicitly.
+export START_EPOCH="${START_EPOCH:-$(( $(date +%s)+START_DELAY_SECONDS ))}"
+export MESH_EXPERIMENT_WORKER=1
 [[ "${RANKS_PER_NODE}" =~ ^[1-9][0-9]*$ && "${START_EPOCH}" =~ ^[0-9]+$ ]] || exit 2
 read -r -a counts <<< "${PROCESS_COUNTS//,/ }"
 read -r -a batch_extra <<< "${SBATCH_EXTRA_ARGS:-}"

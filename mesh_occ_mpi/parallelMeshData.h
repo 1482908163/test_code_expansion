@@ -5,14 +5,15 @@
 #include <vector>
 #include <set>
 #include "mpi.h"
+#include "mesh_ids.h"
 #include <memory.h>
 #include <stdio.h>
 
 //一个重心坐标
 typedef struct Barycentric {
-	int gvrtx[3];	//三个全局顶点的索引
+	int gvrtx[3];	//粗网格顶点索引，用作重心坐标键；不是最终细网格编号
 	short coord[3];	//三个坐标分量
-	int newgid;	//一个新的全局顶点的索引
+	GlobalId newgid;	//一个新的全局顶点的索引
 } Barycentric;
 
 typedef struct Baryvrtx {
@@ -100,21 +101,21 @@ typedef struct IntPair {
 }IntPair;
 
 typedef struct VEindex {
-	int gid;
+	GlobalId gid;
 	int Isin;
 }VEindex;
 
 typedef struct xdVElement {
-	int Pindex[4];
+	GlobalId Pindex[4];
 	xdVertex Vertexs[4];
-	int gid;
+	GlobalId gid;
 	int domidx;
 }xdVElement;
 
 typedef struct xdVElementTet10 {
-	int Pindex[10];
+	GlobalId Pindex[10];
 	xdVertex Vertexs[10];
-	int gid;
+	GlobalId gid;
 	int domidx;
 }xdVElementTet10;
 

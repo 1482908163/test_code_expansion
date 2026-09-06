@@ -11,6 +11,7 @@
 #include "3DNgmesher.h"
 #include "scaling_profiler.h"
 #include "mpi_debug.h"
+#include "mesh_mpi_types.h"
 #include "research_mesh.h"
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -248,6 +249,8 @@ int main(int argc, char **argv) {
     profile_config.repeat = profile_repeat;
     auto &profiler = scaling::Profiler::instance();
     profiler.configure(MPI_COMM_WORLD, profile_config);
+    profiler.add_metadata("global_id_bits", "64");
+    profiler.add_metadata("local_index_bits", "32");
 
     std::ostringstream command_line;
     for (int argument = 0; argument < argc; ++argument) {
@@ -307,7 +310,8 @@ int main(int argc, char **argv) {
         }
 
 
-        // int ret = mkdir(OUTPUT_PATH.c_str(), 0777);
+        // Core-only runs write profiles through the profiler, not mesh artifacts.
+        if (!profiler.core_only()) {
         mkdir(OUTPUT_PATH.c_str(), 0777);
 
         string meshQuality_path = OUTPUT_PATH + string("meshQuality/");
@@ -333,6 +337,7 @@ int main(int argc, char **argv) {
         string volwithadj_path = OUTPUT_PATH + string("volwithadj/");
         // int volwithadj_ret = mkdir(volwithadj_path.c_str(), 0777);
         mkdir(volwithadj_path.c_str(), 0777);
+        }
     }
 
     // Define pointer to OCC Geometry
@@ -629,9 +634,10 @@ int main(int argc, char **argv) {
                 computeadj(id,facemap,g2lvrtxmap, barycvrtx2adjprocsmap);
             }
 
-            int *VEgid;
+            GlobalId *VEgid;
             int numNEs = nglib::Ng_GetNE(submesh);
-            MYCALLOC(VEgid, int *, (numNEs + 1), sizeof(int));
+            require_local_mesh_capacity(numNEs, MPI_COMM_WORLD);
+            MYCALLOC(VEgid, GlobalId *, (static_cast<std::size_t>(numNEs) + 1), sizeof(GlobalId));
 
             if (netgen_mpi_trace_enabled()) {
                 printf("start com_barycoords, id: %d\n", id);
@@ -639,7 +645,7 @@ int main(int argc, char **argv) {
             }
             // cout << id << "start com_barycoords" << endl;
 
-            int *newid = com_barycoords(submesh, MPI_COMM_WORLD, barycvrtx2adjprocsmap,
+            GlobalId *newid = com_barycoords(submesh, MPI_COMM_WORLD, barycvrtx2adjprocsmap,
                                         baryc2locvrtxmap, adjbarycs, numParts, VEgid, id);
 
 
@@ -699,7 +705,7 @@ int main(int argc, char **argv) {
             int tet[4];
             for(int i=0;i < ne;i++){
                 nglib::Ng_GetVolumeElement (mesh, i+1, tet);
-                outelements << VEgid[i+1] << " 1 504 " << newid[tet[0]] << " " << newid[tet[1]] << " " << newid[tet[2]] << " " << newid[tet[3]] << endl;
+                write_partition_element(outelements, VEgid[i+1], tet, newid);
             }
             outelements.close();
 
@@ -708,7 +714,7 @@ int main(int argc, char **argv) {
             double point[3];
             for(int i=0; i<np;i++){
                 nglib::Ng_GetPoint (mesh, i+1, point);
-                outnodes << newid[i+1] << " -1 " << point[0] << " " << point[1] << " " << point[2] << endl;
+                write_partition_node(outnodes, newid[i+1], point);
             }
             outnodes.close();
 
@@ -731,7 +737,7 @@ int main(int argc, char **argv) {
                     }
                     m++;
                 }
-                outshareds << newid[locid] << " " << sharednode << endl;
+                write_partition_shared(outshareds, newid[locid], sharednode);
             }
             outshareds.close();
 
@@ -742,8 +748,8 @@ int main(int argc, char **argv) {
             Index3 i3;
             int l;
             bool (*fn_pt)(Index3,Index3) = fncomp;
-            std::multimap<Index3,int, bool(*)(Index3, Index3)> face2vol(fn_pt);
-            std::multimap<Index3,int, bool(*)(Index3, Index3)>::iterator myit;
+            std::multimap<Index3,GlobalId, bool(*)(Index3, Index3)> face2vol(fn_pt);
+            std::multimap<Index3,GlobalId, bool(*)(Index3, Index3)>::iterator myit;
             for(int i=1; i<=ne;i++){
                 nglib::Ng_GetVolumeElement (mesh, i, tet);
                 for (int j = 1; j <= 4; j++){
@@ -757,7 +763,7 @@ int main(int argc, char **argv) {
                         }
                     }
                     i3.Sort();
-                    face2vol.insert(pair<Index3,int>(i3,VEgid[i]));
+                    face2vol.insert(pair<Index3,GlobalId>(i3,VEgid[i]));
                 }
             }
 
@@ -782,7 +788,7 @@ int main(int argc, char **argv) {
                 myit = face2vol.find(i3);
                 if(myit!= face2vol.end()){
                     number++;
-                    outboundarys << number << " " << geoid << " " << myit->second << " " << "0" << " 303 " << newid[surfpointss[0]]  << " " << newid[surfpointss[1]] << " " << newid[surfpointss[2]] <<endl;
+                    write_partition_boundary(outboundarys, number, geoid, myit->second, surfpointss, newid);
                 }
             }
             outboundarys.close();

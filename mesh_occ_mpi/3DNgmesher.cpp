@@ -7,6 +7,8 @@
 #include "3DNgmesher.h"
 #include "scaling_profiler.h"
 #include "mpi_debug.h"
+#include "mesh_mpi_types.h"
+#include <cinttypes>
 #include "research_mesh.h"
 #include <string>
 #include <time.h>
@@ -917,6 +919,8 @@ void Refineforvol(void *submesh, int belongNumberPartition, std::list<xdFace> &n
 	// std::map< IntPair, int, IntPairCompare >::iterator emi;
 	int index = -1;
 	int oldnse = nglib::Ng_GetNSE((nglib::Ng_Mesh *)submesh);
+	require_local_mesh_capacity(static_cast<GlobalCount>(oldnse) * 4, MPI_COMM_WORLD);
+	require_local_mesh_capacity(static_cast<GlobalCount>(nglib::Ng_GetNE((nglib::Ng_Mesh *)submesh)) * 8, MPI_COMM_WORLD);
 	li = newfaces.begin();
 	int i = 0;
 	for (i = 0; i < oldnse; i++)
@@ -1330,20 +1334,16 @@ void computeadj(
 	}
 }
 
-int *com_barycoords(
+GlobalId *com_barycoords(
 	void *submesh,
 	MPI_Comm comm,
 	std::map<Barycvrtx, std::list<int>, CompBarycvrtx> &barycvrtx2adjprocsmap,
 	std::map<Barycentric, int, CompBarycentric> &baryc2locvrtxmap,
 	std::map<int, std::list<int>> &adjbarycs,
-	int numprocs, int *newgVEid,
+	int numprocs, GlobalId *newgVEid,
 	int mypid)
 {
-	int count = 3;
-	int blocklens[3];
-	MPI_Aint addrs[3];
-	MPI_Datatype mpitypes[3];
-	MPI_Datatype mpibaryctype;
+	MPI_Datatype mpibaryctype = barycentric_mpi_type(comm);
 	int num_s, num_r; // number of sends and receives ���ͺͽ��յ�����
 	int *dest, *src;
 
@@ -1364,41 +1364,22 @@ int *com_barycoords(
 	int i, j, indxowner, ownerpid, locid;
 	std::vector<int> holders;
 	int numverts, numNEs;
-	int *globoffsets, *globoffsetsml;
-	int *globoffsetsVE, *globoffsetsmlVE;
+	std::vector<GlobalId> globoffsets, globoffsetsVE;
+	std::vector<GlobalCount> gathered_counts(numprocs);
 	std::map<int, BarycVector *> pidmap;
 	std::map<int, int> srcmap; // new
-	int newglobalnocounter = 0;
-	int newglobalVEocounter = 0;
-	int *newgid;
+	GlobalCount newglobalnocounter = 0;
+	GlobalId *newgid;
 	std::list<int> pids;
 	std::set<int> neighbor_pids;
 	// initialize new global ids array ��ʼ���µ�ȫ��id����
 	numverts = nglib::Ng_GetNP((nglib::Ng_Mesh *)submesh);
 	numNEs = nglib::Ng_GetNE((nglib::Ng_Mesh *)submesh);
-	MYCALLOC(newgid, int *, (numverts + 1), sizeof(int)); // ids start with 1,initialized to 0 ids��1��ʼ, ��ʼ��Ϊ0
+	require_local_mesh_capacity(numverts, comm);
+	require_local_mesh_capacity(numNEs, comm);
+	MYCALLOC(newgid, GlobalId *, (static_cast<std::size_t>(numverts) + 1), sizeof(GlobalId)); // ids start with 1,initialized to 0 ids��1��ʼ, ��ʼ��Ϊ0
 	num_s = 0;
 	num_r = 0;
-	// construct MPI Datatype MPI������������
-	blocklens[0] = 3;
-	blocklens[1] = 3;
-	blocklens[2] = 1;
-	mpitypes[0] = MPI_INT;
-	mpitypes[1] = MPI_SHORT;
-	mpitypes[2] = MPI_INT;
-	//MPI_Address(&brcy.gvrtx, addrs);
-	//MPI_Address(&brcy.coord, addrs + 1);
-	//MPI_Address(&brcy.newgid, addrs + 2);
-    MPI_Get_address(&brcy.gvrtx, addrs);
-	MPI_Get_address(&brcy.coord, addrs + 1);
-	MPI_Get_address(&brcy.newgid, addrs + 2);
-
-	addrs[1] = addrs[1] - addrs[0];
-	addrs[2] = addrs[2] - addrs[0];
-	addrs[0] = (MPI_Aint)0;
-	//MPI_Type_struct(count, blocklens, addrs, mpitypes, &mpibaryctype);
-    MPI_Type_create_struct(count, blocklens, addrs, mpitypes, &mpibaryctype);
-	MPI_Type_commit(&mpibaryctype);
 	newglobalnocounter = 0; // initialize global number counter��ʼ��ȫ �����ּ�����
 	// Loop goes over the geometric and partition boundary vertices in the new meshѭ���� ���������еļ��κͻ��ֱ߽綥��
 	int length = 0;
@@ -1481,64 +1462,43 @@ int *com_barycoords(
 		"owned_vertices_before_adjacency", static_cast<double>(newglobalnocounter));
 	scaling::Profiler::instance().set_metric(
 		"adjacent_processes", static_cast<double>(neighbor_pids.size()));
-	// compute pre - scan of all newglobalnocounter in array globoffsets
-	MYCALLOC(globoffsetsml, int *, (numprocs + 1), sizeof(int));
-	globoffsets = globoffsetsml + 1;
-	globoffsets[-1] = 0;
 	ProfileCollectiveArrivalWait("vertex_count_pre_collective_wait", comm);
 	{
 		scaling::StageScope profile_stage("vertex_count_allgather", "communication");
-		MPI_Allgather(&newglobalnocounter, 1, MPI_INT, globoffsets, 1, MPI_INT, comm);
+		netgen_mpi_check(comm, MPI_Allgather(&newglobalnocounter, 1, MPI_INT64_T,
+		                 gathered_counts.data(), 1, MPI_INT64_T, comm), "vertex_count/Allgather");
 	}
+	globoffsets = checked_id_offsets(gathered_counts, comm);
 	scaling::Profiler::instance().add_communication(
-		"vertex_count_allgather", 1, 1, static_cast<std::uint64_t>(numprocs-1) * sizeof(int),
-		static_cast<std::uint64_t>(numprocs-1) * sizeof(int));
-    for (i = 0; i < numprocs; i++) {
-        const long long prefix = static_cast<long long>(globoffsets[i]) + globoffsets[i-1];
-        if (prefix > std::numeric_limits<int>::max()) {
-            if (mypid == 0) std::fprintf(stderr,
-                "Global mesh IDs exceed the current 32-bit format; a 64-bit numbering migration is required.\n");
-            MPI_Abort(comm, MPI_ERR_COUNT);
-        }
-        globoffsets[i] = static_cast<int>(prefix);
-    }
+		"vertex_count_allgather", 1, 1, static_cast<std::uint64_t>(numprocs-1) * sizeof(GlobalCount),
+		static_cast<std::uint64_t>(numprocs-1) * sizeof(GlobalCount));
 	// add offsets to global numbers
 	// new
 	for (locid = 1; locid <= numverts; locid++)
 	{
 		if (newgid[locid] != -1)
 		{
-			newgid[locid] += globoffsets[mypid - 1];
+			newgid[locid] += globoffsets[mypid];
 		}
 	}
 	// now do global numbering of the interior vertices ���ڶ��ڲ��嵥Ԫ����ȫ�ֱ��
 	int locVEid;
-	// compute pre - scan of all newglobalnocounter in array globoffsets
-	MYCALLOC(globoffsetsmlVE, int *, (numprocs + 1), sizeof(int));
-	globoffsetsVE = globoffsetsmlVE + 1;
-	globoffsetsVE[-1] = 0;
+	const GlobalCount local_elements = numNEs;
 	ProfileCollectiveArrivalWait("element_count_pre_collective_wait", comm);
 	{
 		scaling::StageScope profile_stage("element_count_allgather", "communication");
-		MPI_Allgather(&numNEs, 1, MPI_INT, globoffsetsVE, 1, MPI_INT, comm);
+		netgen_mpi_check(comm, MPI_Allgather(&local_elements, 1, MPI_INT64_T,
+		                 gathered_counts.data(), 1, MPI_INT64_T, comm), "element_count/Allgather");
 	}
+	globoffsetsVE = checked_id_offsets(gathered_counts, comm);
 	scaling::Profiler::instance().add_communication(
-		"element_count_allgather", 1, 1, static_cast<std::uint64_t>(numprocs-1) * sizeof(int),
-		static_cast<std::uint64_t>(numprocs-1) * sizeof(int));
-    for (i = 0; i < numprocs; i++) {
-        const long long prefix = static_cast<long long>(globoffsetsVE[i]) + globoffsetsVE[i-1];
-        if (prefix > std::numeric_limits<int>::max()) {
-            if (mypid == 0) std::fprintf(stderr,
-                "Global mesh IDs exceed the current 32-bit format; a 64-bit numbering migration is required.\n");
-            MPI_Abort(comm, MPI_ERR_COUNT);
-        }
-        globoffsetsVE[i] = static_cast<int>(prefix);
-    }
+		"element_count_allgather", 1, 1, static_cast<std::uint64_t>(numprocs-1) * sizeof(GlobalCount),
+		static_cast<std::uint64_t>(numprocs-1) * sizeof(GlobalCount));
 	// add offsets to global numbers
 	// new
 	for (locVEid = 1; locVEid <= numNEs; locVEid++)
 	{
-		newgVEid[locVEid] += locVEid + globoffsetsVE[mypid - 1];
+		newgVEid[locVEid] = globoffsetsVE[mypid] + locVEid;
 	}
 	// new
 	std::uint64_t vertex_send_items = 0;
@@ -1620,7 +1580,7 @@ int *com_barycoords(
 				locid = baryc2locvrtxmap[r_data[i][j]];
 				if (newgid[locid] != -1)
 					printf("%d> Error: remote global id %d\n", mypid, locid);
-				newgid[locid] = (r_data[i][j].newgid + globoffsets[src[i] - 1]);
+				newgid[locid] = (r_data[i][j].newgid + globoffsets[src[i]]);
 			}
 		}
 		for (i = 0; i < num_r; i++)
@@ -1639,21 +1599,20 @@ int *com_barycoords(
 			free(r_data);
 			free(src);
 		}
-		free(globoffsetsml);
-		free(globoffsetsmlVE);
+
 	}
 	MPI_Type_free(&mpibaryctype);
 	return newgid;
 }
 
-int *com_baryVolumeElements(
+GlobalId *com_baryVolumeElements(
 	void *submesh,
 	MPI_Comm comm,
 	std::map<Barycvrtx, std::list<int>, CompBarycvrtx> &barycvrtx2adjprocsmap,
 	std::map<Barycentric, int, CompBarycentric> &baryc2locvrtxmap,
 	std::map<int, std::list<int>> &adjbarycs,
-	int *oldgid,
-	int *VEgid,
+	GlobalId *oldgid,
+	GlobalId *VEgid,
 	std::list<VEindex> &VEindexs,
 	int numprocs,
 	int mypid)
@@ -1669,25 +1628,7 @@ int *com_baryVolumeElements(
 	double xyz[3];
 	xdVElement ve;
 
-	int blocklens[4] = {4, 12, 1, 1};
-	MPI_Aint addrs[4];
-	MPI_Datatype mpitypes[4] = {MPI_INT, MPI_DOUBLE, MPI_INT, MPI_INT};
-	MPI_Datatype mpivetype;
-	MPI_Get_address(&ve.Pindex, addrs);
-	MPI_Get_address(&ve.Vertexs, addrs + 1);
-	MPI_Get_address(&ve.gid, addrs + 2);
-	MPI_Get_address(&ve.domidx, addrs + 3);
-	addrs[3] -= addrs[0];
-	addrs[2] -= addrs[0];
-	addrs[1] -= addrs[0];
-	addrs[0] = 0;
-	netgen_mpi_check(
-		comm,
-		MPI_Type_create_struct(4, blocklens, addrs, mpitypes, &mpivetype),
-		"com_baryVolumeElements/MPI_Type_create_struct");
-	netgen_mpi_check(
-		comm, MPI_Type_commit(&mpivetype),
-		"com_baryVolumeElements/MPI_Type_commit");
+	MPI_Datatype mpivetype = volume_element_mpi_type(comm);
 
 	int entity[4];
 	{
@@ -1865,13 +1806,13 @@ int *com_baryVolumeElements(
 		"volume_num_r", static_cast<double>(num_r));
 
 
-	int *newgid = nullptr;
+	GlobalId *newgid = nullptr;
 	{
 		scaling::StageScope profile_stage("volume_exchange_unpack", "compute");
 		const int oldpointnum = nglib::Ng_GetNP(mesh);
-		std::map<int, int> gid2lid;
-		std::map<int, int> gids_add;
-		std::map<int, int> gidVEs_add;
+		std::map<GlobalId, int> gid2lid;
+		std::map<int, GlobalId> gids_add;
+		std::map<int, GlobalId> gidVEs_add;
 		int index = -1;
 		int pi[4];
 
@@ -1880,6 +1821,8 @@ int *com_baryVolumeElements(
 
 		int numVEcount = nglib::Ng_GetNE(mesh);
 		const int numVEold = nglib::Ng_GetNE(mesh);
+		require_local_mesh_capacity(static_cast<GlobalCount>(numVEold) +
+		                            static_cast<GlobalCount>(volume_receive_items), comm);
 		for (int i = 0; i < num_r; ++i)
 		{
 			for (int j = 0; j < r_length[i]; ++j)
@@ -1890,6 +1833,7 @@ int *com_baryVolumeElements(
 					auto point_it = gid2lid.find(ve.Pindex[k]);
 					if (point_it == gid2lid.end())
 					{
+						require_local_mesh_capacity(static_cast<GlobalCount>(nglib::Ng_GetNP(mesh)) + 1, comm);
 						nglib::Ng_AddPoint(mesh, ve.Vertexs[k].xyz, index);
 						gids_add[index] = ve.Pindex[k];
 						gid2lid[ve.Pindex[k]] = index;
@@ -1906,7 +1850,7 @@ int *com_baryVolumeElements(
 			}
 		}
 
-		MYCALLOC(newgid, int *, nglib::Ng_GetNP(mesh) + 1, sizeof(int));
+		MYCALLOC(newgid, GlobalId *, static_cast<std::size_t>(nglib::Ng_GetNP(mesh)) + 1, sizeof(GlobalId));
 		for (int i = 1; i <= oldpointnum; ++i)
 			newgid[i] = oldgid[i];
 		for (const auto &entry : gids_add)
@@ -1934,7 +1878,7 @@ int *com_baryVolumeElements(
 	return newgid;
 }
 
-void Record_LWR_count(double LWR, int *count)
+void Record_LWR_count(double LWR, GlobalCount *count)
 { // record count of length_width_ratio in each interval
 	if (LWR >= 1 && LWR < 1.5)
 		count[0]++;
@@ -1975,7 +1919,7 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 	double TRIS_max = 0;
 	double TRIS_min = 0x3f3f3f;
 
-	int Aspect_Ratio_count[6] = {0, 0, 0, 0, 0, 0}; // 记录长宽比
+	GlobalCount Aspect_Ratio_count[6] = {0, 0, 0, 0, 0, 0}; // 记录长宽比
 
 	{
 		scaling::StageScope profile_stage("quality_surface_compute", "postprocess");
@@ -2007,7 +1951,7 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		TRIS_max = (std::max)(TRIS_max, TRIS);
 		}
 	}
-	int Sum_Aspect_Ratio_count[6] = {0, 0, 0, 0, 0, 0};
+	GlobalCount Sum_Aspect_Ratio_count[6] = {0, 0, 0, 0, 0, 0};
 	netgen_mpi_checkpoint(
 		MPI_COMM_WORLD, "meshQuality.aspect_ratio.reduce.begin", 6, 0);
 	ProfileCollectiveArrivalWait(
@@ -2018,7 +1962,7 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 			MPI_COMM_WORLD,
 			MPI_Reduce(
 				Aspect_Ratio_count, Sum_Aspect_Ratio_count,
-				6, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD),
+				6, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD),
 			"meshQualityEvaluation/MPI_Reduce");
 	}
 	netgen_mpi_checkpoint(
@@ -2035,15 +1979,15 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 			MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
 			std::abort();
 		}
-		int Sum_Count_Surface = 0;
+		GlobalCount Sum_Count_Surface = 0;
 		for (int i = 0; i < 6; ++i)
 			Sum_Count_Surface += Sum_Aspect_Ratio_count[i];
-		fprintf(fp, "Sum_Aspect_Ratio(1-1.5): %f \r\n", (float)Sum_Aspect_Ratio_count[0]/(float)Sum_Count_Surface);
-		fprintf(fp, "Sum_Aspect_Ratio(1.5-2): %f \r\n", (float)Sum_Aspect_Ratio_count[1]/(float)Sum_Count_Surface);
-		fprintf(fp, "Sum_Aspect_Ratio(2-3): %f \r\n", (float)Sum_Aspect_Ratio_count[2]/(float)Sum_Count_Surface);
-		fprintf(fp, "Sum_Aspect_Ratio(3-4): %f \r\n", (float)Sum_Aspect_Ratio_count[3]/(float)Sum_Count_Surface);
-		fprintf(fp, "Sum_Aspect_Ratio(4-5): %f \r\n", (float)Sum_Aspect_Ratio_count[4]/(float)Sum_Count_Surface);
-		fprintf(fp, "Sum_Aspect_Ratio(5-6): %f \r\n", (float)Sum_Aspect_Ratio_count[5]/(float)Sum_Count_Surface);
+		fprintf(fp, "Sum_Aspect_Ratio(1-1.5): %f \r\n", (double)Sum_Aspect_Ratio_count[0]/(double)Sum_Count_Surface);
+		fprintf(fp, "Sum_Aspect_Ratio(1.5-2): %f \r\n", (double)Sum_Aspect_Ratio_count[1]/(double)Sum_Count_Surface);
+		fprintf(fp, "Sum_Aspect_Ratio(2-3): %f \r\n", (double)Sum_Aspect_Ratio_count[2]/(double)Sum_Count_Surface);
+		fprintf(fp, "Sum_Aspect_Ratio(3-4): %f \r\n", (double)Sum_Aspect_Ratio_count[3]/(double)Sum_Count_Surface);
+		fprintf(fp, "Sum_Aspect_Ratio(4-5): %f \r\n", (double)Sum_Aspect_Ratio_count[4]/(double)Sum_Count_Surface);
+		fprintf(fp, "Sum_Aspect_Ratio(5-6): %f \r\n", (double)Sum_Aspect_Ratio_count[5]/(double)Sum_Count_Surface);
 		std::fclose(fp);
 	}
 	int volidx;
@@ -2136,12 +2080,12 @@ bool meshQualityEvaluation(void *mesh, int id, std::string OUTPUT_PATH)
 		fprintf(fp, "triangle_length_width_ratio_max: %f \r\n", LWR_max);
 		fprintf(fp, "triangle_length_width_ratio_mean: %f \r\n", LWR_sum / nse);
 
-		fprintf(fp, "Aspect_Ratio(1-1.5): %d \r\n", Aspect_Ratio_count[0]);
-		fprintf(fp, "Aspect_Ratio(1.5-2): %d \r\n", Aspect_Ratio_count[1]);
-		fprintf(fp, "Aspect_Ratio(2-3): %d \r\n", Aspect_Ratio_count[2]);
-		fprintf(fp, "Aspect_Ratio(3-4): %d \r\n", Aspect_Ratio_count[3]);
-		fprintf(fp, "Aspect_Ratio(4-5): %d \r\n", Aspect_Ratio_count[4]);
-		fprintf(fp, "Aspect_Ratio(5-6): %d \r\n", Aspect_Ratio_count[5]);
+		fprintf(fp, "Aspect_Ratio(1-1.5): %" PRId64 " \r\n", Aspect_Ratio_count[0]);
+		fprintf(fp, "Aspect_Ratio(1.5-2): %" PRId64 " \r\n", Aspect_Ratio_count[1]);
+		fprintf(fp, "Aspect_Ratio(2-3): %" PRId64 " \r\n", Aspect_Ratio_count[2]);
+		fprintf(fp, "Aspect_Ratio(3-4): %" PRId64 " \r\n", Aspect_Ratio_count[3]);
+		fprintf(fp, "Aspect_Ratio(4-5): %" PRId64 " \r\n", Aspect_Ratio_count[4]);
+		fprintf(fp, "Aspect_Ratio(5-6): %" PRId64 " \r\n", Aspect_Ratio_count[5]);
 
 		// fprintf(fp,"triangle_jacobian_ratio_min: %f \r\n",JAC_min);
 		// fprintf(fp, "triangle_jacobian_ratio_max: %f \r\n",JAC_max);
