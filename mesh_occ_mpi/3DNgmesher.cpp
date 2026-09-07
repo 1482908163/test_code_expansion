@@ -1462,6 +1462,7 @@ GlobalId *com_barycoords(
 		"owned_vertices_before_adjacency", static_cast<double>(newglobalnocounter));
 	scaling::Profiler::instance().set_metric(
 		"adjacent_processes", static_cast<double>(neighbor_pids.size()));
+	scaling::Profiler::instance().mark_elapsed("vertex_arrival_elapsed");
 	ProfileCollectiveArrivalWait("vertex_count_pre_collective_wait", comm);
 	{
 		scaling::StageScope profile_stage("vertex_count_allgather", "communication");

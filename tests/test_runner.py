@@ -47,7 +47,7 @@ out=pathlib.Path(value('--profile-dir'))
     binary.chmod(0o755)
     # Capability markers used by the runner to reject stale executables.
     with binary.open('a') as f:
-        f.write("\n# --algorithm research_1 global_id_bits\n")
+        f.write("\n# --algorithm research_1 global_id_bits mesh_phase_v2\n")
     source = tmp/'input.step'
     source.write_text('mock')
     env = dict(os.environ, LOAD_MODULES='0', CLUSTER_ENV_STRICT='0', PROCESS_COUNT='1',
@@ -169,7 +169,7 @@ out=pathlib.Path(value('--profile-dir'))
     # Repeated missing profiles are kept out of the scheduler log.  The user
     # gets one summary and can inspect a dedicated failure file if necessary.
     no_profile=tmp/'no_profile_mesh'
-    no_profile.write_text('#!/bin/sh\n# --profile-core-only --algorithm research_1 global_id_bits\nexit 0\n')
+    no_profile.write_text('#!/bin/sh\n# --profile-core-only --algorithm research_1 global_id_bits mesh_phase_v2\nexit 0\n')
     no_profile.chmod(0o755)
     no_profile_env=dict(env, RUN_ROOT=str(tmp/'no_profile_results'), BINARY=str(no_profile),
         ALGORITHMS='baseline sparse', TIMING_MODES='natural', REPEATS='2', WARMUPS='0')
@@ -195,4 +195,64 @@ out=pathlib.Path(value('--profile-dir'))
         assert any('-N 1 ' in line and '-n 16 ' in line for line in commands)
         assert any('-N 2 ' in line and '-n 32 ' in line for line in commands)
         assert any('-N 4 ' in line and '-n 64 ' in line for line in commands)
+    # Calibration export survives lossless cleanup; old profiles cannot silently
+    # become new-model training data. No extra test files or permanent fixtures.
+    analysis=runpy.run_path(str(ROOT/'strong_scaling/analyze_results.py'))
+    fitting=runpy.run_path(str(ROOT/'strong_scaling/fit_cost_model.py'))
+    new_profile=json.loads(profile)
+    new_profile['metadata'].update(feature_schema='mesh_phase_v2',cost_model='geometric_proxy',
+                                   EXPERIMENT_STAGE='calibration')
+    new_profile['metrics'].update({f'phase_feature_{k}':float(k+1) for k in range(8)})
+    new_profile['metrics'].update(face_complete_elapsed=0.1,vertex_arrival_elapsed=0.8)
+    new_profile['stages']={s:dict(seconds=0.1,calls=1) for s in analysis['COMPUTE']}
+    new_run=tmp/'new_profile';new_run.mkdir()
+    (new_run/'rank_profiles.jsonl').write_text(json.dumps(new_profile)+'\n')
+    assert subprocess.run(analyzer+[str(new_run),'--finish-run'],capture_output=True).returncode==0
+    assert subprocess.run(analyzer+[str(new_run)],capture_output=True).returncode==0
+    with gzip.open(new_run/'analysis/model_samples.csv.gz','rt') as f:
+        exported=list(csv.DictReader(f))
+    assert len(exported)==1 and float(exported[0]['y0'])==0.2
+    assert float(exported[0]['y3'])==0.2 and exported[0]['repeat']=='1'
+    broken=new_profile.copy();broken['metrics']=dict(new_profile['metrics'],vertex_arrival_elapsed=2)
+    (new_run/'rank_profiles.jsonl').write_text(json.dumps(broken)+'\n')
+    assert subprocess.run(analyzer+[str(new_run),'--finish-run'],capture_output=True).returncode==1
+    sample_root=tmp/'calibration'
+    for p in (2,3,4):
+        folder=sample_root/f'p{p}/analysis';folder.mkdir(parents=True)
+        (folder/'issues.txt').write_text('')
+        with gzip.open(folder/'model_samples.csv.gz','wt',newline='') as f:
+            w=csv.DictWriter(f,fieldnames=analysis['SAMPLE_FIELDS']);w.writeheader()
+            for rank in range(p):
+                x=[1,rank+1,20/p+rank,25/p+2*rank,rank/3,rank+2,rank+3,p]
+                for repeat in (1,2):
+                    r={key:'unused' for key in analysis['SAMPLE_META']}
+                    r.update(feature_schema='mesh_phase_v2',EXPERIMENT_STAGE='calibration',
+                        MESH_INPUT_SHA256='input',MESH_BINARY_SHA256='binary',numlevels='3',numrefine='3',
+                        maxh='1000.000000',minh='0.000000',omp_num_threads='1',algorithm='sparse',
+                        ranks=p,rank=rank,repeat=repeat,face_complete_elapsed=1,vertex_arrival_elapsed=10)
+                    r.update({f'x{k}':value for k,value in enumerate(x)})
+                    r.update({f'y{k}':0.1+0.2*(k+1)*x[2] for k in range(4)})
+                    w.writerow(r)
+    model,meta=fitting['train'](sample_root,8,3,3)
+    assert meta['training_ranks']==[2,3,4] and all(v>=0 for v in map(float,model.split()[6:]))
+    # Excluded target data may be arbitrary; it must not affect fit/validation.
+    poison=sample_root/'p8/analysis';poison.mkdir(parents=True)
+    (poison/'model_samples.csv.gz').write_bytes(b'not even a gzip stream')
+    again,again_meta=fitting['train'](sample_root,8,3,3)
+    assert again==model and again_meta==meta
+    frozen=tmp/'p8.model';frozen.write_text(model)
+    frozen.with_suffix('.json').write_text(json.dumps(meta))
+    fitting['verify'](frozen,'input','binary',3,3,'1000','0','1',8)
+    frozen.write_text(model+'0\n')
+    try: fitting['verify'](frozen,'input','binary',3,3,'1000','0','1',8)
+    except ValueError: pass
+    else: raise AssertionError('modified frozen model accepted')
+    # The ordinary submission entry trains all models before any job is sent.
+    evaluation=dict(submit_base,EXPERIMENT_STAGE='evaluation',CALIBRATION_ROOT=str(sample_root),
+                    PROCESS_COUNTS='8',LEVELS='3',REFINES='3',RUN_ROOT=str(tmp/'evaluation'))
+    scheduled=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=evaluation,
+                             capture_output=True,text=True)
+    assert scheduled.returncode==0,scheduled.stderr
+    assert (tmp/'evaluation/models/p8.model').read_text()==model
+    assert (tmp/'evaluation/models/MODEL_REPORT.md').exists()
 print('PASS: Slurm spool path, failure continuation, warmup filtering, compressed resume, lossless analysis, cleanup opt-out, failure/active/symlink protection, configuration guard')

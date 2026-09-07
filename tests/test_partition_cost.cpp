@@ -2,6 +2,7 @@
 #include <cassert>
 #include <iostream>
 #include <random>
+#include <sstream>
 using namespace mesh_research;
 static double max_work(const std::vector<PartCost> &s,const CostConfig &cfg) {
     double m=0;for(const auto&p:s)m=std::max(m,predicted_cost(p,cfg));return m;
@@ -16,6 +17,8 @@ int main() {
         for(int i=0;i<24;++i) {
             cells[i].volume=repeat==0?(i<12?10:1):1+rng()%20;
             cells[i].face_area.fill(1.0);
+            cells[i].face_shape.fill(0.25);
+            cells[i].shape_volume=cells[i].volume*0.5;
             cells[i].vertices={i+1,i+2,i+3,i+4};
             cells[i].face_vertices={{{i+1,i+2,i+3},{i+2,i+3,i+4},{i+1,i+2,i+4},{i+1,i+3,i+4}}};
             if(i>0)cells[i].neighbor[0]=i-1;
@@ -35,11 +38,44 @@ int main() {
             assert(actual[p].cells>0 && actual[p].cells==result.after[p].cells);
             assert(actual[p].faces==result.after[p].faces);
             close(actual[p].volume,result.after[p].volume);close(actual[p].area,result.after[p].area);
+            close(actual[p].inverse_size,result.after[p].inverse_size);
+            close(actual[p].shape_volume,result.after[p].shape_volume);
+            close(actual[p].boundary_shape,result.after[p].boundary_shape);
+            assert(actual[p].physical_faces==result.after[p].physical_faces);
         }
         if(repeat==0){assert(result.accepted_moves>0);std::cout<<"heterogeneous fixture: proxy maximum "
             <<max_work(result.before,cfg)<<" -> "<<max_work(result.after,cfg)<<"\n";}
         auto replay=original;auto repeated=balance_partition(cells,replay,2,cfg);
         assert(replay==part && repeated.accepted_moves==result.accepted_moves);
+        if(repeat==0) {
+            CostConfig seconds_cfg=cfg;
+            seconds_cfg.model.enabled=true;seconds_cfg.model.levels=cfg.levels;
+            seconds_cfg.model.refines=cfg.refines;seconds_cfg.model.held_out_ranks=2;
+            seconds_cfg.model.coefficients[1][2]=1;
+            seconds_cfg.min_gain_seconds=0;seconds_cfg.min_gain_fraction=0;
+            seconds_cfg.closure_growth=1;
+            auto candidate=original;
+            auto selected=balance_partition(cells,candidate,2,seconds_cfg);
+            assert(selected.adopted && selected.accepted_moves>0);
+            assert(max_work(selected.after,seconds_cfg)<max_work(selected.before,seconds_cfg));
+            auto closure=dependency_volume(cells,candidate,2);
+            assert(closure.first==selected.closure_after && closure.second==selected.closure_max_after);
+            // Reject a compute improvement that increases the worst dependency
+            // closure, even when the cut-face budget alone would accept it.
+            seconds_cfg.closure_growth=0;candidate=original;
+            auto constrained=balance_partition(cells,candidate,2,seconds_cfg);
+            assert(!constrained.adopted && constrained.proposed_moves>0 && candidate==original);
+            assert(constrained.rejection_flags&4);
+            seconds_cfg.closure_growth=1;seconds_cfg.min_gain_seconds=1e100;
+            candidate=original;auto rejected=balance_partition(cells,candidate,2,seconds_cfg);
+            assert(!rejected.adopted && rejected.accepted_moves==0 && candidate==original);
+            assert(rejected.rejection_flags&1);
+            // Identical mean area and volume, different boundary size tails.
+            PartCost mixed=selected.before[0],uniform=mixed;
+            mixed.inverse_size*=2;
+            auto a=phase_cost_features(uniform,cfg),b=phase_cost_features(mixed,cfg);
+            close(a[2],b[2]);close(2*a[3],b[3]);
+        }
     }
     // Removing an articulation cell would split its donor component.
     std::vector<CoarseCell> chain(3);std::vector<int> part(3,0);
@@ -67,5 +103,10 @@ int main() {
     assert(!manifold_after_move(0,1,pinch,{0,0,1,1},incidence));
     bool rejected=false;try {cfg.weights={0,0,0,0};balance_partition(chain,part,1,cfg);}catch(...){rejected=true;}
     assert(rejected);
+    for(const std::string body:{"bad 2 2 2 8 4", "mesh_phase_v2 2 2 2 8 4 -1", "mesh_phase_v2 2 2 2 8 4 nan"}) {
+        std::istringstream in(body);bool bad=false;
+        try {PhaseModel model;model.read(in);}catch(const std::runtime_error &){bad=true;}
+        assert(bad);
+    }
     std::cout<<"PASS: cost descent, cut budget, connectivity, boundary manifold, conservation, determinism, invalid weights\n";
 }

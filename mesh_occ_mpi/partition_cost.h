@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <fstream>
 #include <numeric>
 #include <map>
 #include <set>
@@ -9,27 +10,66 @@
 #include <vector>
 
 namespace mesh_research {
+constexpr int phase_features = 8, phase_count = 4;
+struct PhaseModel {
+    bool enabled = false;
+    int levels = 0, refines = 0, held_out_ranks = 0;
+    std::array<std::array<double,phase_features>,phase_count> coefficients{};
+    void read(const std::string &path) {
+        std::ifstream in(path);read(in);
+    }
+    void read(std::istream &in) {
+        std::string magic, extra;
+        int features=0, phases=0;
+        if(!(in>>magic>>levels>>refines>>held_out_ranks>>features>>phases) ||
+           magic!="mesh_phase_v2" || features!=phase_features || phases!=phase_count)
+            throw std::runtime_error("invalid phase model header");
+        double total=0;
+        for(auto &phase:coefficients) for(double &w:phase) {
+            if(!(in>>w) || !std::isfinite(w) || w<0)
+                throw std::runtime_error("invalid phase coefficient");
+            total+=w;
+        }
+        if(in>>extra || total<=0 || !std::isfinite(total))
+            throw std::runtime_error("invalid phase model contents");
+        enabled=true;
+    }
+};
 struct CostConfig {
     int levels = 0, refines = 0, sweeps = 4;
     double cut_growth = 0.05;
     // Surface construction/refinement, remeshing, volume refinement, numbering.
     // Defaults count proxy operations, NOT calibrated seconds.
     std::array<double,4> weights{1,1,1,1};
+    PhaseModel model;
+    // Frozen experiment parameters, NOT a guarantee of measured improvement.
+    double min_gain_seconds = 0.35, min_gain_fraction = 0.05;
+    double closure_growth = 0.0;
 };
 struct CoarseCell {
     std::array<int,4> vertices{};
     std::array<std::array<int,3>,4> face_vertices{};
     double volume = 0;
     std::array<double,4> face_area{};
+    std::array<double,4> face_shape{};
+    double shape_volume = 0;
     std::array<int,4> neighbor{-1,-1,-1,-1};
 };
 struct PartCost {
     int cells = 0, faces = 0;
     double volume = 0, area = 0;
+    double inverse_size = 0, boundary_shape = 0, shape_volume = 0;
+    int physical_faces = 0;
 };
 struct BalanceResult {
     std::vector<PartCost> before, after;
     long long cut_before = 0, cut_after = 0, accepted_moves = 0;
+    long long proposed_moves = 0, closure_before = 0, closure_after = 0;
+    long long closure_max_before = 0, closure_max_after = 0;
+    bool adopted = false;
+    double seed_max_seconds = 0, candidate_max_seconds = 0;
+    long long candidate_closure = 0, candidate_closure_max = 0;
+    int rejection_flags = 0; // 1: gain, 2: total closure, 4: max closure, 8: no moves
 };
 inline std::array<double,4> cost_features(const PartCost &p, const CostConfig &c) {
     if (p.cells == 0) return {0,0,0,0};
@@ -45,12 +85,44 @@ inline std::array<double,4> cost_features(const PartCost &p, const CostConfig &c
     return {p.faces*(1.0+(surface_growth-1.0)/3.0), remesh,
             remesh*(volume_growth-1.0)/7.0, remesh*volume_growth};
 }
+// Size-tail moment distinguishes equal-mean boundaries with different small
+// triangles. Shape descriptors use coarse geometry; they are not CAD curvature.
+inline std::array<double,phase_features> phase_cost_features(const PartCost &p,const CostConfig &c) {
+    if(!p.cells) return {};
+    const auto old=cost_features(p,c);
+    const double g=std::pow(4.0,c.levels);
+    const double tail=p.volume*(12.0/std::sqrt(2.0))*
+        std::pow(std::sqrt(3.0)*g/4.0,1.5)*std::max(0.0,p.inverse_size)/p.area;
+    return {1.0,p.faces*g,old[1],tail,old[1]*std::max(0.0,p.shape_volume)/p.volume,
+        std::max(0.0,p.boundary_shape)*g,p.physical_faces*g,static_cast<double>(p.cells)};
+}
+inline std::array<double,phase_count> predicted_phases(const PartCost &p,const CostConfig &c) {
+    const auto x=phase_cost_features(p,c);
+    std::array<double,phase_count> y{};
+    for(int s=0;s<phase_count;++s) for(int j=0;j<phase_features;++j)
+        y[s]+=x[j]*c.model.coefficients[s][j];
+    return y;
+}
 inline double predicted_cost(const PartCost &p, const CostConfig &c) {
+    if(c.model.enabled) {
+        const auto y=predicted_phases(p,c);
+        const double total=std::accumulate(y.begin(),y.end(),0.0);
+        if(!std::isfinite(total) || total<0) throw std::runtime_error("phase model overflow");
+        return total;
+    }
     const auto f = cost_features(p,c);
     double result = 0;
     for (int k=0;k<4;++k) result += c.weights[k]*f[k];
     if (!std::isfinite(result)) throw std::runtime_error("cost model overflow");
     return result;
+}
+inline void boundary_delta(PartCost &p,const CoarseCell &cell,int face,int delta) {
+    const double area=cell.face_area[face];
+    if(area<=0) throw std::runtime_error("nonpositive boundary area");
+    p.faces+=delta; p.area+=delta*area;
+    p.inverse_size+=delta/std::sqrt(area);
+    p.boundary_shape+=delta*cell.face_shape[face];
+    if(cell.neighbor[face]<0) p.physical_faces+=delta;
 }
 inline std::vector<PartCost> partition_stats(const std::vector<CoarseCell> &cells,
                                            const std::vector<int> &part, int count) {
@@ -59,14 +131,35 @@ inline std::vector<PartCost> partition_stats(const std::vector<CoarseCell> &cell
     for (std::size_t i=0;i<cells.size();++i) {
         if (part[i]<0 || part[i]>=count) throw std::runtime_error("invalid partition label");
         auto &p=stats[part[i]];
-        ++p.cells; p.volume+=cells[i].volume;
+        ++p.cells; p.volume+=cells[i].volume; p.shape_volume+=cells[i].shape_volume;
         for (int k=0;k<4;++k) {
             int n=cells[i].neighbor[k];
             if (n>=static_cast<int>(cells.size())) throw std::runtime_error("invalid neighbor");
-            if (n<0 || part[n]!=part[i]) {++p.faces;p.area+=cells[i].face_area[k];}
+            if (n<0 || part[n]!=part[i]) boundary_delta(p,cells[i],k,1);
         }
     }
     return stats;
+}
+// Exact final face/vertex dependency closure, not a cut-edge approximation.
+// This bounds stored dependency records, not all three rounds' network bytes.
+inline std::pair<long long,long long> dependency_volume(const std::vector<CoarseCell> &cells,
+        const std::vector<int> &part,int count) {
+    using Face=std::array<int,3>;
+    std::map<Face,int> faces;
+    std::map<int,std::set<int>> vertex_faces,consumers;
+    for(std::size_t i=0;i<cells.size();++i) for(int k=0;k<4;++k) {
+        int n=cells[i].neighbor[k];
+        if(n>=0 && part[n]==part[i]) continue;
+        Face key=cells[i].face_vertices[k]; std::sort(key.begin(),key.end());
+        const int id=faces.emplace(key,static_cast<int>(faces.size())).first->second;
+        for(int v:key) {vertex_faces[v].insert(id);consumers[v].insert(part[i]);}
+    }
+    std::vector<std::set<int>> closure(count);
+    for(const auto &v:vertex_faces) for(int p:consumers.at(v.first))
+        closure[p].insert(v.second.begin(),v.second.end());
+    long long total=0,maximum=0;
+    for(const auto &p:closure) {total+=p.size();maximum=std::max(maximum,static_cast<long long>(p.size()));}
+    return {total,maximum};
 }
 inline long long cut_faces(const std::vector<CoarseCell> &cells,const std::vector<int> &part) {
     long long result=0;
@@ -134,7 +227,12 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
         std::vector<int> &part,int count,const CostConfig &config,bool optimize=true) {
     if(config.levels<0 || config.refines<0 || config.levels+config.refines>13 ||
        config.sweeps<0 || config.cut_growth<0 || !std::isfinite(config.cut_growth))
-        throw std::runtime_error("invalid balancing parameters");
+       throw std::runtime_error("invalid balancing parameters");
+    if(config.model.enabled && (config.model.levels!=config.levels ||
+        config.model.refines!=config.refines || config.model.held_out_ranks!=count))
+        throw std::runtime_error("phase model does not match levels/refines/held-out rank count");
+    for(double v:{config.min_gain_seconds,config.min_gain_fraction,config.closure_growth})
+        if(!std::isfinite(v) || v<0) throw std::runtime_error("invalid candidate selection budget");
     for(double w:config.weights)
         if(!std::isfinite(w)||w<0) throw std::runtime_error("invalid cost weights");
     if(std::accumulate(config.weights.begin(),config.weights.end(),0.0)<=0)
@@ -144,6 +242,13 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
     for(const auto &p:result.before) if(p.cells==0) throw std::runtime_error("empty METIS partition");
     result.cut_before=cut_faces(cells,part); result.cut_after=result.cut_before;
     if(!optimize) return result;
+    const auto seed=part;
+    double seed_max=0;
+    for(const auto &p:result.before) seed_max=std::max(seed_max,predicted_cost(p,config));
+    if(config.model.enabled) {
+        const auto d=dependency_volume(cells,seed,count);
+        result.closure_before=d.first; result.closure_max_before=d.second;
+    }
     std::map<int,std::vector<int>> incidence;
     for(std::size_t i=0;i<cells.size();++i)for(int v:cells[i].vertices) {
         if(v<=0)throw std::runtime_error("missing coarse vertex identity");
@@ -171,15 +276,15 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
                 PartCost a=result.after[from],b=result.after[to];
                 --a.cells; ++b.cells;
                 a.volume-=cells[i].volume; b.volume+=cells[i].volume;
+                a.shape_volume-=cells[i].shape_volume; b.shape_volume+=cells[i].shape_volume;
                 int cut_delta=0;
                 for(int k=0;k<4;++k) {
                     const int n=cells[i].neighbor[k];
                     const int other=n<0?-1:part[n];
-                    const double area=cells[i].face_area[k];
                     int da=-1,db=1;
                     if(other==from) {da=1;db=1;++cut_delta;}
                     else if(other==to) {da=-1;db=-1;--cut_delta;}
-                    a.faces+=da;b.faces+=db;a.area+=da*area;b.area+=db*area;
+                    boundary_delta(a,cells[i],k,da);boundary_delta(b,cells[i],k,db);
                 }
                 if(result.cut_after+cut_delta>budget || a.area<=0 || b.area<=0 ||
                    a.volume<=0 || b.volume<=0 || a.faces<=0 || b.faces<=0) continue;
@@ -200,6 +305,26 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
             ++moves;++result.accepted_moves;
         }
         if(!moves) break;
+    }
+    result.proposed_moves=result.accepted_moves;
+    result.adopted=result.accepted_moves>0;
+    if(config.model.enabled) {
+        const auto d=dependency_volume(cells,part,count);
+        result.closure_after=d.first; result.closure_max_after=d.second;
+        const double candidate_max=*std::max_element(work.begin(),work.end());
+        const double required=std::max(config.min_gain_seconds,config.min_gain_fraction*seed_max);
+        result.seed_max_seconds=seed_max;result.candidate_max_seconds=candidate_max;
+        result.candidate_closure=d.first;result.candidate_closure_max=d.second;
+        if(seed_max-candidate_max<=required)result.rejection_flags|=1;
+        if(d.first>result.closure_before*(1+config.closure_growth))result.rejection_flags|=2;
+        if(d.second>result.closure_max_before*(1+config.closure_growth))result.rejection_flags|=4;
+        if(!result.accepted_moves)result.rejection_flags|=8;
+        result.adopted=result.rejection_flags==0;
+        if(!result.adopted) {
+            part=seed;result.after=result.before;result.cut_after=result.cut_before;
+            result.accepted_moves=0;result.closure_after=result.closure_before;
+            result.closure_max_after=result.closure_max_before;
+        }
     }
     return result;
 }

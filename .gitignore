@@ -21,7 +21,8 @@ __pycache__/
 # 网格和应用输出，通常最大
 strong_scaling_results/**/application_output/
 
-# 每次重复实验的逐-rank 原始数据体积很大；上传 analysis/*.csv 即可分析。
+# 每次重复实验的逐-rank 原始数据体积很大；保留 analysis/*.csv、
+# 第二轮 analysis/model_samples.csv.gz 和 models/，供分析及冻结模型复现。
 strong_scaling_results/**/rank_profiles.jsonl
 strong_scaling_results/**/rank_profiles.jsonl.gz
 

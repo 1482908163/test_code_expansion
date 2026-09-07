@@ -15,6 +15,20 @@ export STRONG_SCALING_DIR="${SCRIPT_DIR}"
 # 环境变量仍可覆盖这些默认值，主要供作业脚本内部传递及断点续跑使用。
 # ============================================================================
 EXPERIMENT_PRESET="${EXPERIMENT_PRESET:-production}"
+# 第二轮仍只改本配置区、直接 bash strong_scaling/run_experiments.sh。
+# calibration: 采样（第一轮旧数据缺少新特征，不能直接训练）。
+# evaluation : 从 CALIBRATION_ROOT 自动冻结排除目标规模的模型，运行四组对照。
+# legacy     : 运行第一轮的几何代理模型，用于方法复查。
+EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-calibration}"
+CALIBRATION_ROOT="${CALIBRATION_ROOT:-}"
+MIN_GAIN_SECONDS="${MIN_GAIN_SECONDS:-0.35}"
+MIN_GAIN_FRACTION="${MIN_GAIN_FRACTION:-0.05}"
+CLOSURE_GROWTH="${CLOSURE_GROWTH:-0}"
+case "${EXPERIMENT_STAGE}" in
+    calibration) default_algorithms="baseline sparse" ;;
+    evaluation|legacy) default_algorithms="baseline balance sparse combined" ;;
+    *) echo "EXPERIMENT_STAGE must be calibration, evaluation or legacy" >&2; exit 2 ;;
+esac
 case "${EXPERIMENT_PRESET}" in
     pilot)
         default_process_counts="16 32 64"
@@ -32,7 +46,7 @@ case "${EXPERIMENT_PRESET}" in
 esac
 
 PROCESS_COUNTS="${PROCESS_COUNTS:-${default_process_counts}}"
-ALGORITHMS="${ALGORITHMS:-baseline balance sparse combined}"
+ALGORITHMS="${ALGORITHMS:-${default_algorithms}}"
 TIMING_MODES="${TIMING_MODES:-natural split}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-16}"
 REPEATS="${REPEATS:-5}"
@@ -61,6 +75,7 @@ export EXPERIMENT_PRESET PROCESS_COUNTS ALGORITHMS TIMING_MODES RANKS_PER_NODE
 export REPEATS WARMUPS LEVELS REFINES MAXH MINH VERIFY_FACES CLEANUP_RESULTS RESUME
 export BALANCE_SWEEPS CUT_GROWTH COST_WEIGHTS TIMEOUT_SECONDS START_DELAY_SECONDS
 export PARTITION SBATCH_COMMAND SBATCH_EXTRA_ARGS MPI_LAUNCHER MPI_EXTRA_ARGS DRY_RUN INPUT_PATH
+export EXPERIMENT_STAGE CALIBRATION_ROOT MIN_GAIN_SECONDS MIN_GAIN_FRACTION CLOSURE_GROWTH
 
 # 登录节点：转入提交驱动；计算作业：继续执行下方 worker（工作进程）逻辑。
 if [[ "${MESH_EXPERIMENT_WORKER:-0}" != 1 ]]; then
@@ -102,7 +117,7 @@ done
 # revisions.  That produces ordinary mesh artifacts but no rank profile, and
 # the failure would otherwise be discovered only after many expensive runs.
 binary_error=""
-for marker in "--profile-core-only" "--algorithm" "research_1" "global_id_bits"; do
+for marker in "--profile-core-only" "--algorithm" "research_1" "global_id_bits" "mesh_phase_v2"; do
     if ! LC_ALL=C grep -aFq -- "${marker}" "${BINARY}"; then
         binary_error="missing capability marker ${marker}"
         break
@@ -120,6 +135,20 @@ if [[ -n "${binary_error}" ]]; then
     echo "No experiment was started and no result directory needs analysis." >&2
     exit 2
 fi
+export MESH_INPUT_SHA256="$(sha256sum "${INPUT_PATH}" | cut -d ' ' -f1)"
+export MESH_BINARY_SHA256="$(sha256sum "${BINARY}" | cut -d ' ' -f1)"
+export MESH_SOURCE_REVISION="$(git -C "${REPOSITORY_ROOT}" rev-parse HEAD)"
+export MESH_MODEL_SHA256="none"
+model_args=()
+if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
+    model="${RUN_ROOT}/models/p${PROCESS_COUNT}.model"
+    python3 "${SCRIPT_DIR}/fit_cost_model.py" --verify "${model}" --levels "${LEVELS}" --refines "${REFINES}" \
+        --target-ranks "${PROCESS_COUNT}" --input-sha "${MESH_INPUT_SHA256}" --binary-sha "${MESH_BINARY_SHA256}" \
+        --maxh "${MAXH}" --minh "${MINH}" --threads "${OMP_NUM_THREADS}"
+    export MESH_MODEL_SHA256="$(sha256sum "${model}" | cut -d ' ' -f1)"
+    model_args=(--phase-model "${model}" --min-gain-seconds "${MIN_GAIN_SECONDS}"
+                --min-gain-fraction "${MIN_GAIN_FRACTION}" --closure-growth "${CLOSURE_GROWTH}")
+fi
 # Every submitted job has the SAME earliest launch time; no serial dependencies.
 while (( $(date +%s) < ${START_EPOCH:-0} )); do
     remaining=$(( START_EPOCH - $(date +%s) ))
@@ -136,7 +165,8 @@ case "$(basename "${MPI_LAUNCHER}")" in yhrun|srun)
     launch+=(-N "$(( (PROCESS_COUNT+RANKS_PER_NODE-1)/RANKS_PER_NODE ))") ;;
 esac
 common=(-i "${INPUT_PATH}" -l "${LEVELS}" -r "${REFINES}" --maxh "${MAXH}" --minh "${MINH}" -adj
-        --balance-sweeps "${BALANCE_SWEEPS:-4}" --cut-growth "${CUT_GROWTH:-0.05}" --cost-weights "${COST_WEIGHTS:-1,1,1,1}")
+        --balance-sweeps "${BALANCE_SWEEPS:-4}" --cut-growth "${CUT_GROWTH:-0.05}" --cost-weights "${COST_WEIGHTS:-1,1,1,1}"
+        "${model_args[@]}")
 # Correctness checks deliberately cannot be combined with timing collection.
 if [[ "${VERIFY_FACES}" == 1 ]]; then
     for a in sparse combined; do
@@ -146,7 +176,7 @@ if [[ "${VERIFY_FACES}" == 1 ]]; then
             --algorithm "${a}" --verify-faces -v -o "${checkdir}/" > "${checkdir}/run.log" 2>&1 || exit $?
     done
 fi
-config_text="$(printf '%s\n' "${PROCESS_COUNT}" "${ALGORITHMS}" "${TIMING_MODES}" "${REPEATS}" "${WARMUPS}" "${common[@]}" "OMP_NUM_THREADS=${OMP_NUM_THREADS}"; sha256sum "${BINARY}" "${INPUT_PATH}")"
+config_text="$(printf '%s\n' "${PROCESS_COUNT}" "${ALGORITHMS}" "${TIMING_MODES}" "${REPEATS}" "${WARMUPS}" "${common[@]}" "OMP_NUM_THREADS=${OMP_NUM_THREADS}" "EXPERIMENT_STAGE=${EXPERIMENT_STAGE}" "MODEL_SHA256=${MESH_MODEL_SHA256}"; sha256sum "${BINARY}" "${INPUT_PATH}")"
 if [[ -f "${pdir}/configuration.txt" && "$(cat "${pdir}/configuration.txt")" != "${config_text}" ]]; then
     echo "Existing results use another configuration; choose a new RUN_ROOT." >&2
     exit 2

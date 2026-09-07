@@ -20,6 +20,14 @@ read -r -a batch_extra <<< "${SBATCH_EXTRA_ARGS:-}"
 ((${#counts[@]}>0)) || exit 2
 for p in "${counts[@]}"; do [[ "${p}" =~ ^[1-9][0-9]*$ ]] || exit 2; done
 mkdir -p "${RUN_ROOT}"
+if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
+    [[ -n "${CALIBRATION_ROOT}" && -d "${CALIBRATION_ROOT}" ]] || {
+        echo "Set CALIBRATION_ROOT in run_experiments.sh to the completed second-round calibration directory." >&2
+        exit 2
+    }
+    python3 "${SCRIPT_DIR}/fit_cost_model.py" --calibration-root "${CALIBRATION_ROOT}" \
+        --target-ranks "${counts[@]}" --levels "${LEVELS}" --refines "${REFINES}" --output "${RUN_ROOT}/models"
+fi
 printf '%s\n' "${counts[@]}" > "${RUN_ROOT}/requested_process_counts.txt"
 failures=0
 for p in "${counts[@]}"; do

@@ -27,7 +27,10 @@ void Profiler::configure(MPI_Comm comm, const ProfileConfig &config) {
     comm_ = comm; config_ = config; active_ = false;
     stages_.clear(); metrics_.clear(); metadata_.clear();
 }
-void Profiler::begin_core() { stages_.clear(); active_ = true; }
+void Profiler::begin_core() { stages_.clear(); core_origin_=MPI_Wtime(); active_ = true; }
+void Profiler::mark_elapsed(const std::string &name) {
+    if(enabled()) set_metric(name,MPI_Wtime()-core_origin_);
+}
 void Profiler::set_total_elapsed(double seconds) {
     set_metric("core_seconds", seconds); active_ = false;
 }

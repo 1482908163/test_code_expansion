@@ -28,6 +28,11 @@ std::vector<mesh_research::CoarseCell> coarse_graph(nglib::Ng_Mesh *mesh) {
         graph[i].volume=std::abs(a[0]*(b[1]*c[2]-b[2]*c[1])-
                                 a[1]*(b[0]*c[2]-b[2]*c[0])+a[2]*(b[0]*c[1]-b[1]*c[0]))/6.0;
         if(graph[i].volume<=0) throw std::runtime_error("degenerate coarse tetrahedron");
+        double edge2=0;
+        for(int u=0;u<4;++u) for(int v=u+1;v<4;++v) for(int d=0;d<3;++d)
+            edge2+=(x[u][d]-x[v][d])*(x[u][d]-x[v][d]);
+        const double quality=12*std::pow(3*graph[i].volume,2.0/3.0)/edge2;
+        graph[i].shape_volume=graph[i].volume*std::max(0.0,1.0/quality-1.0);
         for(int k=0;k<4;++k) {
             int fv[3];double y[3][3];
             nglib::My_Ng_GetFace_Vertices(mesh,fids[k],fv);
@@ -37,6 +42,10 @@ std::vector<mesh_research::CoarseCell> coarse_graph(nglib::Ng_Mesh *mesh) {
             c[0]=a[1]*b[2]-a[2]*b[1];c[1]=a[2]*b[0]-a[0]*b[2];c[2]=a[0]*b[1]-a[1]*b[0];
             graph[i].face_area[k]=0.5*std::sqrt(c[0]*c[0]+c[1]*c[1]+c[2]*c[2]);
             if(graph[i].face_area[k]<=0) throw std::runtime_error("degenerate coarse face");
+            double edges2=0;
+            for(int u=0;u<3;++u) for(int v=u+1;v<3;++v) for(int d=0;d<3;++d)
+                edges2+=(y[u][d]-y[v][d])*(y[u][d]-y[v][d]);
+            graph[i].face_shape[k]=std::max(0.0,edges2/(4*std::sqrt(3.0)*graph[i].face_area[k])-1.0);
             if(paired.count(fids[k])) throw std::runtime_error("non-manifold coarse mesh");
             auto entry=first_face.emplace(fids[k],std::make_pair(i,k));
             if(!entry.second) {
@@ -67,6 +76,7 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
     if(!labels || ne<parts || ne<=0) protocol_error(MPI_COMM_WORLD,"more partitions than coarse cells");
     std::vector<double> all_stats;
     auto &profile=scaling::Profiler::instance();
+    constexpr int stat_count=9+phase_features+phase_count;
     if(rank==0) {
         try {
             std::vector<int> part(ne,0);
@@ -86,24 +96,39 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
                 scaling::StageScope time("partition_cost_balance","compute");
                 result=balance_partition(graph,part,parts,options().cost,options().balance());
             }
-            all_stats.resize(static_cast<std::size_t>(parts)*9);
+            all_stats.resize(static_cast<std::size_t>(parts)*stat_count);
             for(int p=0;p<parts;++p) {
                 const auto after=cost_features(result.after[p],options().cost);
-                double *s=all_stats.data()+p*9;
+                double *s=all_stats.data()+p*stat_count;
                 s[0]=predicted_cost(result.before[p],options().cost);
                 s[1]=predicted_cost(result.after[p],options().cost);
                 s[2]=result.after[p].cells;s[3]=result.after[p].faces;s[4]=result.after[p].volume;
                 for(int k=0;k<4;++k)s[5+k]=after[k];
+                const auto x=phase_cost_features(result.after[p],options().cost);
+                const auto y=predicted_phases(result.after[p],options().cost);
+                for(int k=0;k<phase_features;++k)s[9+k]=x[k];
+                for(int k=0;k<phase_count;++k)s[9+phase_features+k]=y[k];
             }
             for(int i=0;i<ne;++i)labels[i]=part[i];
             profile.set_metric("partition_cut_before",result.cut_before);
             profile.set_metric("partition_cut_after",result.cut_after);
             profile.set_metric("partition_moves",result.accepted_moves);
+            profile.set_metric("partition_proposed_moves",result.proposed_moves);
+            profile.set_metric("partition_adopted",result.adopted?1:0);
+            profile.set_metric("closure_total_before",result.closure_before);
+            profile.set_metric("closure_total_after",result.closure_after);
+            profile.set_metric("closure_max_before",result.closure_max_before);
+            profile.set_metric("closure_max_after",result.closure_max_after);
+            profile.set_metric("candidate_closure_total",result.candidate_closure);
+            profile.set_metric("candidate_closure_max",result.candidate_closure_max);
+            profile.set_metric("seed_max_seconds",result.seed_max_seconds);
+            profile.set_metric("candidate_max_seconds",result.candidate_max_seconds);
+            profile.set_metric("partition_rejection_flags",result.rejection_flags);
         } catch(const std::exception &e) {protocol_error(MPI_COMM_WORLD,e.what());}
     }
     // Common to all four ablations: one reproducible seed/label assignment.
     // Its entire cost is inside the measured core interval.
-    double local_stats[9];
+    double local_stats[stat_count];
     if(profile.split_collectives()) {
         scaling::StageScope wait("partition_pre_collective_wait","synchronization");
         check_mpi(MPI_Barrier(MPI_COMM_WORLD),MPI_COMM_WORLD);
@@ -112,15 +137,17 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
         scaling::StageScope time("partition_distribution","communication");
         const MPI_Datatype type=sizeof(idx_t)==4?MPI_INT32_T:MPI_INT64_T;
         check_mpi(MPI_Bcast(labels,ne,type,0,MPI_COMM_WORLD),MPI_COMM_WORLD);
-        check_mpi(MPI_Scatter(all_stats.data(),9,MPI_DOUBLE,local_stats,9,MPI_DOUBLE,0,MPI_COMM_WORLD),MPI_COMM_WORLD);
+        check_mpi(MPI_Scatter(all_stats.data(),stat_count,MPI_DOUBLE,local_stats,stat_count,MPI_DOUBLE,0,MPI_COMM_WORLD),MPI_COMM_WORLD);
     }
     const std::uint64_t label_bytes=static_cast<std::uint64_t>(ne)*sizeof(idx_t);
     profile.add_communication("partition_distribution",rank==0?parts-1:0,rank?1:0,
-        rank==0?(parts-1)*(label_bytes+9*sizeof(double)):0,rank?label_bytes+9*sizeof(double):0);
+        rank==0?(parts-1)*(label_bytes+stat_count*sizeof(double)):0,rank?label_bytes+stat_count*sizeof(double):0);
     const char *names[]={"predicted_cost_before","predicted_cost_after","assigned_coarse_cells",
         "assigned_boundary_faces","assigned_volume","cost_feature_surface","cost_feature_remesh",
         "cost_feature_refine","cost_feature_numbering"};
     for(int k=0;k<9;++k)profile.set_metric(names[k],local_stats[k]);
+    for(int k=0;k<phase_features;++k)profile.set_metric("phase_feature_"+std::to_string(k),local_stats[9+k]);
+    for(int k=0;k<phase_count;++k)profile.set_metric("phase_prediction_"+std::to_string(k),local_stats[9+phase_features+k]);
     return labels;
 }
 void SparseGatherFaceMap(std::map<int,xdMeshFaceInfo> &facemap,

@@ -18,6 +18,12 @@ from pathlib import Path
 
 COMPUTE = ("part_face_create", "surface_refine", "local_volume_mesh",
            "volume_refine", "adjacency_build", "vertex_numbering_local")
+PHASES = (COMPUTE[:2], (COMPUTE[2],), (COMPUTE[3],), COMPUTE[4:])
+SAMPLE_META = ("feature_schema", "EXPERIMENT_STAGE", "MESH_INPUT_SHA256", "MESH_BINARY_SHA256",
+               "MESH_SOURCE_REVISION", "MESH_MODEL_SHA256", "numlevels", "numrefine", "maxh", "minh", "omp_num_threads")
+SAMPLE_FIELDS = list(SAMPLE_META)+["algorithm", "ranks", "rank", "repeat"]+[
+    f"x{k}" for k in range(8)]+[f"y{k}" for k in range(4)]+[
+    "face_complete_elapsed", "vertex_arrival_elapsed"]
 
 def profile_path(directory):
     raw = directory/"rank_profiles.jsonl"
@@ -124,7 +130,7 @@ def corr(a, b):
 def seconds(row, name):
     return row["stages"].get(name, {}).get("seconds", 0.0)
 
-def inspect(path):
+def inspect(path, sample_sink=None):
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt") as stream:
         rows = [json.loads(line) for line in stream if line.strip()]
@@ -169,6 +175,46 @@ def inspect(path):
                   cut_before=max(r["metrics"].get("partition_cut_before", 0) for r in rows),
                   cut_after=max(r["metrics"].get("partition_cut_after", 0) for r in rows),
                   partition_moves=max(r["metrics"].get("partition_moves", 0) for r in rows))
+    if metadata.get("feature_schema") == "mesh_phase_v2":
+        # Validate even during --finish-run, before SUCCESS is written.
+        samples=[]
+        for r in rows:
+            sample={k:metadata.get(k, "unset") for k in SAMPLE_META}
+            sample.update(algorithm=metadata["algorithm"], ranks=n, rank=r["rank"], repeat=r["repeat"])
+            sample.update({f"x{k}":r["metrics"][f"phase_feature_{k}"] for k in range(8)})
+            sample.update({f"y{k}":sum(seconds(r, s) for s in phase) for k,phase in enumerate(PHASES)})
+            for key in ("face_complete_elapsed", "vertex_arrival_elapsed"):
+                sample[key]=r["metrics"][key]
+            if any(not math.isfinite(sample[k]) or sample[k]<0 for k in SAMPLE_FIELDS[len(SAMPLE_META)+4:]):
+                raise ValueError("invalid phase sample")
+            if sample["vertex_arrival_elapsed"]<sample["face_complete_elapsed"]:
+                raise ValueError("invalid within-rank event order")
+            if sample["vertex_arrival_elapsed"]>r["metrics"]["core_seconds"]+1e-6:
+                raise ValueError("event endpoint exceeds core interval")
+            if any(r["stages"].get(s, {}).get("calls", 0)!=1 for s in COMPUTE):
+                raise ValueError("phase model requires one complete call of each compute stage")
+            samples.append(sample)
+        face_end=[r["metrics"]["face_complete_elapsed"] for r in rows]
+        arrival=[r["metrics"]["vertex_arrival_elapsed"] for r in rows]
+        result.update(compute_max_seconds=max(compute), compute_mean_seconds=mean(compute),
+                      vertex_wait_mean_seconds=mean(waiting) if split else None,
+                      face_completion_spread=max(face_end)-min(face_end),
+                      vertex_arrival_spread=max(arrival)-min(arrival),
+                      post_face_compute_max_seconds=max(b-a for a,b in zip(face_end,arrival)),
+                      face_completion_wait_correlation=corr(face_end,waiting) if split else None)
+        for key in ("partition_adopted", "partition_proposed_moves", "closure_total_before", "closure_total_after",
+                    "closure_max_before", "closure_max_after", "candidate_closure_total", "candidate_closure_max",
+                    "seed_max_seconds", "candidate_max_seconds", "partition_rejection_flags"):
+            result[key]=max(r["metrics"].get(key,0) for r in rows)
+        for s in ("metis_partition", "partition_cost_setup", "partition_cost_balance"):
+            result[s+"_seconds"]=max(seconds(r,s) for r in rows)
+        for k in range(4):
+            actual=[s[f"y{k}"] for s in samples]
+            result[f"phase_{k}_max_seconds"]=max(actual)
+            result[f"phase_{k}_prediction_wape"]=(sum(abs(r["metrics"][f"phase_prediction_{k}"]-a)
+                for r,a in zip(rows,actual))/sum(actual) if metadata["cost_model"]=="phase_seconds_v2" and sum(actual)>0 else None)
+        if sample_sink is not None and not split and rows[0]["repeat"]>0:
+            sample_sink.writerows(samples)
     return result, detail
 
 def write_csv(path, rows):
@@ -247,6 +293,12 @@ def main():
             raise SystemExit(1)
         return
     runs, stage_rows, errors = [], [], []
+    output = args.root/"analysis"
+    output.mkdir(exist_ok=True)
+    sample_tmp=output/"model_samples.csv.gz.tmp"
+    sample_stream=gzip.open(sample_tmp, "wt", newline="")
+    sample_writer=csv.DictWriter(sample_stream,fieldnames=SAMPLE_FIELDS)
+    sample_writer.writeheader()
     completed = []
     directories = {p.parent for pattern in ("rank_profiles.jsonl", "rank_profiles.jsonl.gz") for p in args.root.rglob(pattern)}
     for directory in sorted(directories):
@@ -258,7 +310,7 @@ def main():
                 if not (directory/"SUCCESS").exists():
                     errors.append(f"Incomplete run: {directory}")
                     continue
-                result, details = inspect(profile_path(directory))
+                result, details = inspect(profile_path(directory), sample_writer)
             completed.append(directory)
             if result["repeat"] <= 0:
                 continue  # Explicit warmups; no subtraction/estimated timing.
@@ -289,7 +341,7 @@ def main():
         for name in runs[0]:
             if name in ("algorithm", "timing", "ranks", "repeat", "core_seconds"):
                 continue
-            present = [r[name] for r in group if r[name] is not None]
+            present = [r[name] for r in group if r.get(name) is not None]
             summary[name+"_median"] = st.median(present) if present else None
         base = groups.get(("baseline", timing, ranks))
         summary["speedup_vs_baseline"] = st.median(r["core_seconds"] for r in base)/summary["core_median"] if base else None
@@ -311,6 +363,11 @@ def main():
     write_csv(output/"stages.csv", stage_rows)
     write_csv(output/"summary.csv", summaries)
     (output/"issues.txt").write_text("\n".join(errors)+( "\n" if errors else ""))
+    sample_stream.close()
+    if any("compute_max_seconds" in r for r in runs):
+        os.replace(sample_tmp,output/"model_samples.csv.gz")
+    else:
+        sample_tmp.unlink()
     expected, complete = write_overview(args.root, runs, summaries, errors)
     print(f"RESULT: {len(runs)}/{expected} measured runs, {len(errors)} issues; read {args.root/'RESULT_SUMMARY.txt'}")
     if not runs:

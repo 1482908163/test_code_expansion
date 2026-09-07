@@ -40,6 +40,9 @@ void print_help() {
          "--balance-sweeps <整数> : 分区修正轮数，默认4" << endl <<
          "--cut-growth <比例> : 允许新增切分面比例，默认0.05" << endl <<
          "--cost-weights <a,b,c,d> : 四阶段代价权重，默认1,1,1,1" << endl <<
+         "--phase-model <文件> : 冻结的分阶段耗时模型，由统一脚本提供" << endl <<
+         "--min-gain-seconds / --min-gain-fraction : 预计最大耗时下降门槛" << endl <<
+         "--closure-growth <比例> : 最终依赖闭包增长预算，默认0" << endl <<
          "--verify-faces : 与全收集结果核对；仅用于小规模正确性运行" << endl <<
          "--profile-natural : 采集自然运行时间，关闭诊断用前置屏障" << endl <<
          "--profile : 开启强扩展指标采集" << endl <<
@@ -162,7 +165,9 @@ int main(int argc, char **argv) {
             mesh_research::options().verify_faces = true;
         }
         else if(!strcmp(argv[i],"--algorithm") || !strcmp(argv[i],"--balance-sweeps") ||
-                !strcmp(argv[i],"--cut-growth") || !strcmp(argv[i],"--cost-weights")) {
+                !strcmp(argv[i],"--cut-growth") || !strcmp(argv[i],"--cost-weights") ||
+                !strcmp(argv[i],"--phase-model") || !strcmp(argv[i],"--min-gain-seconds") ||
+                !strcmp(argv[i],"--min-gain-fraction") || !strcmp(argv[i],"--closure-growth")) {
             const std::string option=argv[i];
             if(i+1>=argc) { if(id==0) print_help(); MPI_Abort(MPI_COMM_WORLD,2); }
             const std::string value=argv[++i];
@@ -170,6 +175,15 @@ int main(int argc, char **argv) {
                 auto &research=mesh_research::options();
                 std::size_t consumed=0;
                 if(option=="--algorithm") research.algorithm=value;
+                else if(option=="--phase-model") research.model_path=value;
+                else if(option=="--min-gain-seconds" || option=="--min-gain-fraction" || option=="--closure-growth") {
+                    const double v=std::stod(value,&consumed);
+                    if(consumed!=value.size() || !std::isfinite(v) || v<0)
+                        throw std::runtime_error("invalid selection budget");
+                    if(option=="--min-gain-seconds") research.cost.min_gain_seconds=v;
+                    else if(option=="--min-gain-fraction") research.cost.min_gain_fraction=v;
+                    else research.cost.closure_growth=v;
+                }
                 else if(option=="--balance-sweeps") {
                     research.cost.sweeps=std::stoi(value,&consumed);
                     if(consumed!=value.size()) throw std::runtime_error("invalid sweeps");
@@ -225,6 +239,16 @@ int main(int argc, char **argv) {
 
     auto &research = mesh_research::options();
     research.cost.levels=numlevels;research.cost.refines=numrefine;
+    // Only rank zero evaluates partitions. Load the immutable small model once,
+    // before coarse meshing; do not issue thousands of shared-filesystem reads.
+    if(id==0 && !research.model_path.empty()) {
+        try {
+            research.cost.model.read(research.model_path);
+            if(research.cost.model.levels!=numlevels || research.cost.model.refines!=numrefine ||
+               research.cost.model.held_out_ranks!=p) throw std::runtime_error("phase model configuration mismatch");
+        }
+        catch(const std::exception &e) {std::cerr<<e.what()<<std::endl;MPI_Abort(MPI_COMM_WORLD,2);}
+    }
     if ((research.algorithm!="baseline" && research.algorithm!="balance" &&
          research.algorithm!="sparse" && research.algorithm!="combined") ||
         (research.verify_faces && (!research.sparse() || profile_enabled)) ||
@@ -267,12 +291,16 @@ int main(int argc, char **argv) {
     profiler.add_metadata("adjacency_enabled", isComputeAdj ? "true" : "false");
     profiler.add_metadata("save_vol", save_vol ? "true" : "false");
     profiler.add_metadata("profiler_schema_version", "research_1");
+    profiler.add_metadata("feature_schema", "mesh_phase_v2");
     profiler.add_metadata("algorithm",research.algorithm);
     profiler.add_metadata("timing_mode",profile_split?"split":"natural");
     profiler.add_metadata("timing_boundary","post_coarse_barrier_to_adjacency_complete");
     profiler.add_metadata("core_only",profile_core_only?"true":"false");
     profiler.add_metadata("partition_contract","one partition per MPI rank");
-    profiler.add_metadata("cost_model","geometric boundary spacing proxy, not calibrated seconds");
+    profiler.add_metadata("cost_model",research.model_path.empty()?"geometric_proxy":"phase_seconds_v2");
+    for(const char *key:{"MESH_INPUT_SHA256","MESH_BINARY_SHA256","MESH_SOURCE_REVISION","MESH_MODEL_SHA256","EXPERIMENT_STAGE"}) {
+        const char *v=std::getenv(key);profiler.add_metadata(key,v?v:"unset");
+    }
     profiler.add_metadata("cut_growth",std::to_string(research.cost.cut_growth));
     profiler.add_metadata("balance_sweeps",std::to_string(research.cost.sweeps));
     std::ostringstream weights;
@@ -545,6 +573,7 @@ int main(int argc, char **argv) {
             scaling::StageScope phase("face_pipeline_total", "algorithm");
             ExtractPartitionSurfaceMesh(occ_mesh, edest, facemap, time_part1_detail);
         }
+        profiler.mark_elapsed("face_complete_elapsed");
         //MPI_Barrier(MPI_COMM_WORLD);
         double currtime1 = MPI_Wtime();
         time[1] = double(currtime1 - currtime0);

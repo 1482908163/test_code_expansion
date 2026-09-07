@@ -24,6 +24,7 @@ public:
     bool core_only() const { return config_.core_only; }
     bool split_collectives() const { return enabled() && config_.split_collectives; }
     void begin_core();
+    void mark_elapsed(const std::string &name);
     void set_total_elapsed(double seconds);
     void add_metadata(const std::string &key, const std::string &value);
     void set_metric(const std::string &key, double value);
@@ -42,6 +43,7 @@ private:
     MPI_Comm comm_ = MPI_COMM_NULL;
     ProfileConfig config_;
     bool active_ = false;
+    double core_origin_ = 0;
     std::map<std::string, Stage> stages_;
     std::map<std::string, double> metrics_;
     std::map<std::string, std::string> metadata_;

@@ -2,7 +2,8 @@
 
 新分支：`agent/dependency-aware-mesh-balance`。原采集分支保持不变。
 
-实现及文献说明：[算法设计](../docs/algorithm_design.md)。代码是待集群验证的研究实现，尚无新算法加速比结论。
+第一轮完成：稀疏通信显著降低通信开销，旧均衡模型尚无稳定净收益。见 [第一轮归档](../docs/experiments/20260906_first_run.md)。
+第二轮方法、公式、校准隔离与判断标准见 [研究记录](../docs/research_log.md)；第二轮尚未在集群实测。
 
 ## 四组消融
 
@@ -51,19 +52,25 @@ bash strong_scaling/run_experiments.sh
 
 提交时会把源码中的 `strong_scaling`（强扩展脚本目录）保存到 `STRONG_SCALING_DIR`，因此即使 `yhbatch`（作业提交器）把运行脚本复制为 `/tmp/slurmd/job*/slurm_script`，计算节点仍从仓库原目录加载 `cluster_env.sh`（集群环境脚本）和分析器，不会到临时目录查找配套文件。
 
-默认 `EXPERIMENT_PRESET=pilot`（预检配置）：16、32、64个 MPI（消息传递接口）进程，对应1、2、4个节点，表面/体细化均为1，并执行稀疏面正确性核对。预检通过后，只把配置区中的：
+当前保留用户正式规模默认值 `EXPERIMENT_PRESET=production`：1024、2048、4096、8192进程，对应64、128、256、512节点，L=R=3。
+若需要先预检，在配置区改为 `pilot`：16、32、64进程，对应1、2、4节点，L=R=1，并执行稀疏面正确性核对。
+
+第二轮先保持配置区：
 
 ```bash
-EXPERIMENT_PRESET="${EXPERIMENT_PRESET:-pilot}"
+EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-calibration}"
 ```
 
-改为：
+完成校准后，在同一个配置区改两处（目录填本次新校准结果，第一轮旧汇总缺少新特征）：
 
 ```bash
-EXPERIMENT_PRESET="${EXPERIMENT_PRESET:-production}"
+EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-evaluation}"
+CALIBRATION_ROOT="${CALIBRATION_ROOT:-/完整路径/本次校准结果目录}"
 ```
 
-`production`（正式配置）自动采用1024、2048、4096、8192个进程，对应64、128、256、512个节点，表面/体细化均为3。两种预设都默认运行四组算法、`natural`（自然运行）与 `split`（等待/执行拆分），预热1次、正式重复5次，每节点16进程，`MAXH=1000`、`MINH=0`，成功后清理过程数据。
+两步都只执行 `bash strong_scaling/run_experiments.sh`，无需在命令行拼接环境参数；各用一个新结果目录。校准默认 baseline/sparse，评价默认四组消融。两步均默认 natural/split、预热1次、正式5次、每节点16进程、`MAXH=1000`、`MINH=0`，成功后清理过程数据。
+
+评价前自动训练每个目标规模的冻结模型，完全排除该目标规模的校准样本；例如8192仅使用1024/2048/4096。先在 `models/MODEL_REPORT.md` 查看内部验证，实际性能结论仍由目标规模对照给出。模型绑定输入、二进制、L/R、线程与网格参数，不允许混用。`legacy` 模式保留第一轮代理修正；要精确复现第一轮源码应使用归档的提交。
 
 `submit_suite.sh`（套件提交入口）仍可作为同一脚本的兼容入口。
 
@@ -86,7 +93,7 @@ EXPERIMENT_PRESET="${EXPERIMENT_PRESET:-production}"
 - 保留原始指标、日志内容、汇总表、运行参数、作业状态、预热记录、质量统计及未知文件。失败现场和 `verify_*`（正确性验证）目录不自动清理，便于排错和结果比对。
 - 运行器和分析器共用目录锁；活动运行不会被清理。压缩失败保留原始文件，并输出清理告警；清理失败不会把有效性能测量改成失败。
 
-如需保留全部过程文件，在提交命令前设置 `CLEANUP_RESULTS=0`（关闭清理）。手动分析时用 `--keep-artifacts`（保留过程文件）关闭本次清理：
+如需保留全部过程文件，在统一配置区设置 `CLEANUP_RESULTS=0`（关闭清理）。手动分析时用 `--keep-artifacts`（保留过程文件）关闭本次清理：
 
 ```bash
 python3 strong_scaling/analyze_results.py /完整实验结果目录 --keep-artifacts
@@ -131,6 +138,7 @@ python3 strong_scaling/analyze_results.py /完整实验结果目录
 - `stages.csv`（各阶段）：逐次最大/平均时间，便于定位不均衡来自哪一步。
 - `summary.csv`（汇总）：重复实验中位数、变异系数、相同进程数与计时模式下相对对照的加速比。
 - `issues.txt`（异常）：失败、缺失或不完整记录，不静默当成成功结果。
+- `model_samples.csv.gz`（第二轮紧凑样本）：阶段特征、耗时和可复现身份；供训练/验证使用，不必逐行阅读。上传结果时保留此文件；评价批次也保留根目录的 `models/`。不需要上传所有逐次原始画像。
 
 检查时先看自然运行核心时间，再看拆分等待、三轮稀疏通信总成本及分区修正开销。预测代价下降并不保证真实时间下降。跨进程数/划分模式若实际网格数量变化，不直接套用固定工作量强扩展效率。
 
