@@ -20,10 +20,10 @@ COMPUTE = ("part_face_create", "surface_refine", "local_volume_mesh",
            "volume_refine", "adjacency_build", "vertex_numbering_local")
 PHASES = (COMPUTE[:2], (COMPUTE[2],), (COMPUTE[3],), COMPUTE[4:])
 SAMPLE_META = ("feature_schema", "EXPERIMENT_STAGE", "MESH_INPUT_SHA256", "MESH_BINARY_SHA256",
-               "MESH_SOURCE_REVISION", "MESH_MODEL_SHA256", "numlevels", "numrefine", "maxh", "minh", "omp_num_threads")
+               "MESH_SOURCE_REVISION", "MESH_MODEL_SHA256", "numlevels", "numrefine", "maxh", "minh", "omp_num_threads", "partition_seed")
 SAMPLE_FIELDS = list(SAMPLE_META)+["algorithm", "ranks", "rank", "repeat"]+[
-    f"x{k}" for k in range(8)]+[f"y{k}" for k in range(4)]+[
-    "face_complete_elapsed", "vertex_arrival_elapsed"]
+    f"x{k}" for k in range(14)]+[f"y{k}" for k in range(4)]+[
+    "face_complete_elapsed", "vertex_arrival_elapsed", "processor_name"]
 
 def profile_path(directory):
     raw = directory/"rank_profiles.jsonl"
@@ -161,6 +161,7 @@ def inspect(path, sample_sink=None):
                      if name == "face_allgatherv" or name.startswith("face_sparse_"))
     split = metadata["timing_mode"] == "split"
     result = dict(algorithm=metadata["algorithm"], timing=metadata["timing_mode"], ranks=n,
+                  partition_seed=int(metadata.get("partition_seed",-1)),
                   repeat=rows[0]["repeat"], core_seconds=max(r["metrics"]["core_seconds"] for r in rows),
                   face_pipeline_seconds=max(seconds(r, "face_pipeline_total") for r in rows),
                   face_exchange_seconds=max(sum(s["seconds"] for name, s in r["stages"].items()
@@ -175,17 +176,22 @@ def inspect(path, sample_sink=None):
                   cut_before=max(r["metrics"].get("partition_cut_before", 0) for r in rows),
                   cut_after=max(r["metrics"].get("partition_cut_after", 0) for r in rows),
                   partition_moves=max(r["metrics"].get("partition_moves", 0) for r in rows))
-    if metadata.get("feature_schema") == "mesh_phase_v2":
+    if metadata.get("feature_schema") in ("mesh_phase_v2", "mesh_phase_v3"):
         # Validate even during --finish-run, before SUCCESS is written.
         samples=[]
+        features=14 if metadata["feature_schema"]=="mesh_phase_v3" else 8
         for r in rows:
             sample={k:metadata.get(k, "unset") for k in SAMPLE_META}
+            sample["partition_seed"]=result["partition_seed"]
+            sample["processor_name"]=r.get("processor_name","unset")
             sample.update(algorithm=metadata["algorithm"], ranks=n, rank=r["rank"], repeat=r["repeat"])
-            sample.update({f"x{k}":r["metrics"][f"phase_feature_{k}"] for k in range(8)})
+            sample.update({f"x{k}":r["metrics"][f"phase_feature_{k}"] for k in range(features)})
             sample.update({f"y{k}":sum(seconds(r, s) for s in phase) for k,phase in enumerate(PHASES)})
             for key in ("face_complete_elapsed", "vertex_arrival_elapsed"):
                 sample[key]=r["metrics"][key]
-            if any(not math.isfinite(sample[k]) or sample[k]<0 for k in SAMPLE_FIELDS[len(SAMPLE_META)+4:]):
+            numeric=[sample[f"x{k}"] for k in range(features)]+[sample[f"y{k}"] for k in range(4)]+[
+                sample["face_complete_elapsed"],sample["vertex_arrival_elapsed"]]
+            if any(not math.isfinite(v) or v<0 for v in numeric):
                 raise ValueError("invalid phase sample")
             if sample["vertex_arrival_elapsed"]<sample["face_complete_elapsed"]:
                 raise ValueError("invalid within-rank event order")
@@ -204,15 +210,17 @@ def inspect(path, sample_sink=None):
                       face_completion_wait_correlation=corr(face_end,waiting) if split else None)
         for key in ("partition_adopted", "partition_proposed_moves", "closure_total_before", "closure_total_after",
                     "closure_max_before", "closure_max_after", "candidate_closure_total", "candidate_closure_max",
-                    "seed_max_seconds", "candidate_max_seconds", "partition_rejection_flags"):
-            result[key]=max(r["metrics"].get(key,0) for r in rows)
+                    "seed_max_seconds", "candidate_max_seconds", "partition_rejection_flags",
+                    "seed_lower_seconds", "candidate_upper_seconds", "net_gain_lower_seconds",
+                    "correction_seconds", "search_timed_out", "search_skipped"):
+            result[key]=next(r for r in rows if r["rank"]==0)["metrics"].get(key,0)
         for s in ("metis_partition", "partition_cost_setup", "partition_cost_balance"):
             result[s+"_seconds"]=max(seconds(r,s) for r in rows)
         for k in range(4):
             actual=[s[f"y{k}"] for s in samples]
             result[f"phase_{k}_max_seconds"]=max(actual)
             result[f"phase_{k}_prediction_wape"]=(sum(abs(r["metrics"][f"phase_prediction_{k}"]-a)
-                for r,a in zip(rows,actual))/sum(actual) if metadata["cost_model"]=="phase_seconds_v2" and sum(actual)>0 else None)
+                for r,a in zip(rows,actual))/sum(actual) if metadata["cost_model"].startswith("phase_seconds") and sum(actual)>0 else None)
         if sample_sink is not None and not split and rows[0]["repeat"]>0:
             sample_sink.writerows(samples)
     return result, detail
@@ -229,7 +237,7 @@ def expected_runs(root):
     total = 0
     for path in root.rglob("plan.json"):
         plan = json.loads(path.read_text())
-        total += plan["repeats"] * len(plan["algorithms"]) * len(plan["timings"])
+        total += plan["repeats"] * len(plan["algorithms"]) * len(plan["timings"]) * len(plan.get("partition_seeds",[-1]))
     return total
 
 def compact(value, digits=3):
@@ -255,12 +263,13 @@ def write_overview(root, runs, summaries, errors):
         "4. repeat_*/run.log.gz：只在排查某次失败时查看。",
         "",
         "核心汇总（时间单位 s，通信量单位 GiB）：",
-        "algorithm timing ranks repeats core face_exchange vertex_wait imbalance recv_GiB speedup",
+        "algorithm timing ranks seed repeats core face_exchange vertex_wait imbalance recv_GiB speedup",
     ]
     for row in summaries:
         received = row.get("face_payload_receive_bytes_median")
         lines.append(" ".join((
             str(row["algorithm"]), str(row["timing"]), str(row["ranks"]),
+            str(row["partition_seed"]),
             str(row["successful_repeats"]), compact(row["core_median"]),
             compact(row.get("face_exchange_seconds_median")),
             compact(row.get("vertex_wait_seconds_median")),
@@ -268,6 +277,10 @@ def write_overview(root, runs, summaries, errors):
             compact(received/(1024**3) if received is not None else None),
             compact(row.get("speedup_vs_baseline")),
         )))
+        if row["algorithm"] in ("balance","combined"):
+            lines.append("  分区诊断：采用比例="+compact(row.get("adoption_rate"))+
+                         "；跳过搜索次数="+str(row.get("skipped_runs",0))+
+                         "；拒绝原因计数="+str(row.get("rejection_counts","{}")))
     if errors:
         lines += ["", "存在异常：请先查看 analysis/issues.txt，不能直接使用本批结果。"]
     (root/"RESULT_SUMMARY.txt").write_text("\n".join(lines)+"\n")
@@ -316,35 +329,44 @@ def main():
                 continue  # Explicit warmups; no subtraction/estimated timing.
             runs.append(result)
             for detail in details:
-                identity = {k: result[k] for k in ("algorithm", "timing", "ranks", "repeat")}
+                identity = {k: result[k] for k in ("algorithm", "timing", "ranks", "partition_seed", "repeat")}
                 identity.update(detail)
                 stage_rows.append(identity)
         except (OSError, EOFError, ValueError, KeyError, TypeError) as error:
             errors.append(f"{directory}: {error}")
-    present_runs = {(r["algorithm"], r["timing"], r["ranks"], r["repeat"]) for r in runs}
+    present_runs = {(r["algorithm"], r["timing"], r["ranks"], r["partition_seed"], r["repeat"]) for r in runs}
+    if len(present_runs)!=len(runs): errors.append("Duplicate run identity (algorithm, timing, ranks, seed, repeat)")
     for plan_path in args.root.rglob("plan.json"):
         plan = json.loads(plan_path.read_text())
         for algorithm in plan["algorithms"]:
             for timing in plan["timings"]:
-                missing = [rep for rep in range(1, plan["repeats"]+1)
-                           if (algorithm, timing, plan["ranks"], rep) not in present_runs]
-                if missing:
-                    errors.append(f"Missing measured repeats: p{plan['ranks']} {algorithm}/{timing}: {missing}")
+                for seed in plan.get("partition_seeds",[-1]):
+                    missing = [rep for rep in range(1, plan["repeats"]+1)
+                               if (algorithm, timing, plan["ranks"], seed, rep) not in present_runs]
+                    if missing:
+                        errors.append(f"Missing measured repeats: p{plan['ranks']} seed={seed} {algorithm}/{timing}: {missing}")
     groups = defaultdict(list)
     for run in runs:
-        groups[run["algorithm"], run["timing"], run["ranks"]].append(run)
+        groups[run["algorithm"], run["timing"], run["ranks"], run["partition_seed"]].append(run)
     summaries = []
-    for (algorithm, timing, ranks), group in sorted(groups.items()):
+    for (algorithm, timing, ranks, seed), group in sorted(groups.items()):
         values = [r["core_seconds"] for r in group]
-        summary = dict(algorithm=algorithm, timing=timing, ranks=ranks, successful_repeats=len(group),
+        summary = dict(algorithm=algorithm, timing=timing, ranks=ranks, partition_seed=seed, successful_repeats=len(group),
                        core_median=st.median(values), core_cv=st.stdev(values)/mean(values) if len(values)>1 else None)
         for name in runs[0]:
-            if name in ("algorithm", "timing", "ranks", "repeat", "core_seconds"):
+            if name in ("algorithm", "timing", "ranks", "partition_seed", "repeat", "core_seconds"):
                 continue
             present = [r[name] for r in group if r.get(name) is not None]
             summary[name+"_median"] = st.median(present) if present else None
-        base = groups.get(("baseline", timing, ranks))
+        base = groups.get(("baseline", timing, ranks, seed))
         summary["speedup_vs_baseline"] = st.median(r["core_seconds"] for r in base)/summary["core_median"] if base else None
+        sparse=groups.get(("sparse",timing,ranks,seed))
+        summary["speedup_vs_sparse"] = st.median(r["core_seconds"] for r in sparse)/summary["core_median"] if sparse else None
+        summary["adoption_rate"]=mean([r.get("partition_adopted",0) for r in group])
+        summary["skipped_runs"]=sum(r.get("search_skipped",0) for r in group)
+        reasons={1:"nominal_gain",2:"total_closure",4:"max_closure",8:"no_moves",16:"error_or_net_gain",32:"feature_range"}
+        summary["rejection_counts"]=json.dumps({name:sum(bool(int(r.get("partition_rejection_flags",0))&bit) for r in group)
+            for bit,name in reasons.items()},sort_keys=True)
         summaries.append(summary)
     # Failures are retained even when the driver continued to later experiments.
     for path in args.root.rglob("run_status.tsv"):

@@ -66,10 +66,13 @@ void Profiler::finalize() {
     active_ = false;
     int rank, size;
     MPI_Comm_rank(comm_, &rank); MPI_Comm_size(comm_, &size);
+    char host[MPI_MAX_PROCESSOR_NAME];int host_length=0;
+    MPI_Get_processor_name(host,&host_length);
     std::ostringstream row;
     row << std::setprecision(17) << "{\"rank\":" << rank << ",\"ranks\":" << size
         << ",\"repeat\":" << config_.repeat << ",\"experiment\":"
-        << quoted(config_.experiment) << ",\"metadata\":{";
+        << quoted(config_.experiment) << ",\"processor_name\":"
+        << quoted(std::string(host,host_length)) << ",\"metadata\":{";
     bool first = true;
     for (const auto &m : metadata_) {
         if (!first) row << ',';

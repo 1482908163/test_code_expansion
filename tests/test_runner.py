@@ -38,7 +38,8 @@ for folder, name in [('test_occ','test_occ.vol'),('refinedSurfmesh','refinedSurf
 print('diagnostic log '*1000)
 if algorithm=='baseline' and repeat==1: sys.exit(9)
 row={'rank':0,'ranks':1,'repeat':repeat,'experiment':algorithm,
-     'metadata':{'algorithm':algorithm,'timing_mode':'natural','core_only':'true','description':'sample '*1000},
+     'metadata':{'algorithm':algorithm,'timing_mode':'natural','core_only':'true','description':'sample '*1000,
+                 'partition_seed':value('--partition-seed')},
      'metrics':{'core_seconds':1,'local_volume_elements_before_adjacency':10},
      'stages':{'face_pipeline_total':{'seconds':0.1,'calls':1}}}
 out=pathlib.Path(value('--profile-dir'))
@@ -47,7 +48,7 @@ out=pathlib.Path(value('--profile-dir'))
     binary.chmod(0o755)
     # Capability markers used by the runner to reject stale executables.
     with binary.open('a') as f:
-        f.write("\n# --algorithm research_1 global_id_bits mesh_phase_v2\n")
+        f.write("\n# --algorithm research_1 global_id_bits mesh_phase_v3\n")
     source = tmp/'input.step'
     source.write_text('mock')
     env = dict(os.environ, LOAD_MODULES='0', CLUSTER_ENV_STRICT='0', PROCESS_COUNT='1',
@@ -55,7 +56,7 @@ out=pathlib.Path(value('--profile-dir'))
         ALGORITHMS='baseline sparse', TIMING_MODES='natural', REPEATS='1', WARMUPS='1',
         MPI_LAUNCHER=str(launcher), MPI_EXTRA_ARGS=' ', START_EPOCH='0', VERIFY_FACES='0',
         RANKS_PER_NODE='1', TIMEOUT_SECONDS='10', CLEANUP_RESULTS='1',
-        MESH_EXPERIMENT_WORKER='1')
+        MESH_EXPERIMENT_WORKER='1',PARTITION_SEEDS='-1')
     # Reproduce yhbatch: execute a copy named slurm_script outside the source
     # tree while STRONG_SCALING_DIR points back to the real companion scripts.
     spooled=tmp/'slurm_script'
@@ -169,7 +170,7 @@ out=pathlib.Path(value('--profile-dir'))
     # Repeated missing profiles are kept out of the scheduler log.  The user
     # gets one summary and can inspect a dedicated failure file if necessary.
     no_profile=tmp/'no_profile_mesh'
-    no_profile.write_text('#!/bin/sh\n# --profile-core-only --algorithm research_1 global_id_bits mesh_phase_v2\nexit 0\n')
+    no_profile.write_text('#!/bin/sh\n# --profile-core-only --algorithm research_1 global_id_bits mesh_phase_v3\nexit 0\n')
     no_profile.chmod(0o755)
     no_profile_env=dict(env, RUN_ROOT=str(tmp/'no_profile_results'), BINARY=str(no_profile),
         ALGORITHMS='baseline sparse', TIMING_MODES='natural', REPEATS='2', WARMUPS='0')
@@ -180,6 +181,18 @@ out=pathlib.Path(value('--profile-dir'))
     missing_pdir=tmp/'no_profile_results/p1'
     assert len((missing_pdir/'failures.log').read_text().splitlines())==4
     assert '0 / 4' in (missing_pdir/'RESULT_SUMMARY.txt').read_text()
+
+    # Different seed partitions remain different experiment groups, including
+    # their warmups, resume identity and expected-count validation.
+    multi_env=dict(env,RUN_ROOT=str(tmp/'multi_seed'),ALGORITHMS='sparse',PARTITION_SEEDS='-1 17 41')
+    multi=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=multi_env,capture_output=True,text=True)
+    assert multi.returncode==0,(multi.stdout,multi.stderr)
+    multi_dir=tmp/'multi_seed/p1'
+    summaries=list(csv.DictReader((multi_dir/'analysis/summary.csv').open()))
+    assert len(summaries)==3 and {int(r['partition_seed']) for r in summaries}=={-1,17,41}
+    assert all(r['successful_repeats']=='1' for r in summaries)
+    assert '3 / 3' in (multi_dir/'RESULT_SUMMARY.txt').read_text()
+    assert len(list(csv.DictReader((multi_dir/'run_status.tsv').open(),delimiter='\t')))==6
 
     # The public entry submits all configured scales; no parameters are required
     # on its command line. Direct calls to the compatibility entry behave alike.
@@ -228,7 +241,7 @@ out=pathlib.Path(value('--profile-dir'))
                     r={key:'unused' for key in analysis['SAMPLE_META']}
                     r.update(feature_schema='mesh_phase_v2',EXPERIMENT_STAGE='calibration',
                         MESH_INPUT_SHA256='input',MESH_BINARY_SHA256='binary',numlevels='3',numrefine='3',
-                        maxh='1000.000000',minh='0.000000',omp_num_threads='1',algorithm='sparse',
+                        maxh='1000.000000',minh='0.000000',omp_num_threads='1',partition_seed=-1,algorithm='sparse',
                         ranks=p,rank=rank,repeat=repeat,face_complete_elapsed=1,vertex_arrival_elapsed=10)
                     r.update({f'x{k}':value for k,value in enumerate(x)})
                     r.update({f'y{k}':0.1+0.2*(k+1)*x[2] for k in range(4)})
@@ -247,12 +260,76 @@ out=pathlib.Path(value('--profile-dir'))
     try: fitting['verify'](frozen,'input','binary',3,3,'1000','0','1',8)
     except ValueError: pass
     else: raise AssertionError('modified frozen model accepted')
+    # The expanded schema cannot be silently populated from old eight-feature
+    # runs. Construct distinct, repeated synthetic partition groups in place.
+    v3_root=tmp/'calibration_v3'
+    for p in (2,3,4):
+        folder=v3_root/f'p{p}/analysis';folder.mkdir(parents=True)
+        (folder/'issues.txt').write_text('')
+        with gzip.open(folder/'model_samples.csv.gz','wt',newline='') as f:
+            w=csv.DictWriter(f,fieldnames=analysis['SAMPLE_FIELDS']);w.writeheader()
+            for seed in (-1,17,41):
+                for rank in range(p):
+                    x=[1,rank+1,20/p+rank,25/p+2*rank,rank/3,rank+2,rank+3,p]+[
+                        (rank+1)*(k+1)+seed/100 for k in range(6)]
+                    for repeat in (1,2):
+                        r={key:'unused' for key in analysis['SAMPLE_META']}
+                        r.update(feature_schema='mesh_phase_v3',EXPERIMENT_STAGE='calibration',
+                            MESH_INPUT_SHA256='input',MESH_BINARY_SHA256='binary',numlevels='3',numrefine='3',
+                            maxh='1000',minh='0',omp_num_threads='1',partition_seed=seed,algorithm='sparse',
+                            ranks=p,rank=rank,repeat=repeat,face_complete_elapsed=1,vertex_arrival_elapsed=10)
+                        r.update({f'x{k}':v for k,v in enumerate(x)})
+                        r.update({f'y{k}':0.1+0.2*(k+1)*x[2]+0.02*x[8] for k in range(4)})
+                        w.writerow(r)
+    model3,meta3=fitting['train'](v3_root,8,3,3)
+    assert meta3['schema']=='mesh_phase_v3' and meta3['rank_samples']==27
+    assert meta3['partition_seeds']==[-1,17,41] and len(meta3['validation'])==6
+    assert {r['group_kind'] for r in meta3['validation']}=={'ranks','seed'}
+    assert len(meta3['feature_ranges'])==14 and meta3['tail_weight']==4
+    # Correct ordering at small P must not hide reversed ordering at large P.
+    ranking=[dict(ranks=p,seed=-1,rank=i,x=[x],y=[y,0,0,0])
+             for p,items in [(2,[(10,10),(9,9)]),(4,[(1,2),(2,1)])]
+             for i,(x,y) in enumerate(items)]
+    scored=fitting['score']([[1],[0],[0],[0]],ranking)
+    assert scored['slowest_one_percent_recall']==0.5
+    assert scored['worst_group_slowest_relative_error']==-0.5
+    poisoned=v3_root/'p8/analysis';poisoned.mkdir(parents=True)
+    (poisoned/'model_samples.csv.gz').write_bytes(b'invalid target excluded before read')
+    assert fitting['train'](v3_root,8,3,3)==(model3,meta3)
+    # A changed seed is not an extra timing repeat; incomplete seed/rank groups
+    # invalidate training even if all process counts are present.
+    incomplete=v3_root/'p2/analysis/model_samples.csv.gz'
+    original=incomplete.read_bytes()
+    with gzip.open(incomplete,'rt') as f: samples=list(csv.DictReader(f))
+    with gzip.open(incomplete,'wt',newline='') as f:
+        w=csv.DictWriter(f,fieldnames=analysis['SAMPLE_FIELDS']);w.writeheader()
+        w.writerows(r for r in samples if not (r['partition_seed']=='17' and r['rank']=='1'))
+    try: fitting['train'](v3_root,8,3,3)
+    except ValueError as e: assert 'missing calibration' in str(e)
+    else: raise AssertionError('incomplete partition accepted')
+    incomplete.write_bytes(original)
+    # New per-rank placement stays outside common run metadata and survives
+    # compact export; negative root-only net gain must not be masked by zeros.
+    new_profile['metadata'].update(feature_schema='mesh_phase_v3',partition_seed='17')
+    new_profile['processor_name']='cn_test'
+    new_profile['metrics'].update({f'phase_feature_{k}':float(k+1) for k in range(14)})
+    new_profile['metrics']['net_gain_lower_seconds']=-3
+    (new_run/'rank_profiles.jsonl').write_text(json.dumps(new_profile)+'\n')
+    assert subprocess.run(analyzer+[str(new_run),'--finish-run'],capture_output=True).returncode==0
+    assert subprocess.run(analyzer+[str(new_run)],capture_output=True).returncode==0
+    with gzip.open(new_run/'analysis/model_samples.csv.gz','rt') as f: sample=next(csv.DictReader(f))
+    assert sample['processor_name']=='cn_test' and sample['partition_seed']=='17' and sample['x13']=='14.0'
+    assert float(next(csv.DictReader((new_run/'analysis/runs.csv').open()))['net_gain_lower_seconds'])==-3
     # The ordinary submission entry trains all models before any job is sent.
-    evaluation=dict(submit_base,EXPERIMENT_STAGE='evaluation',CALIBRATION_ROOT=str(sample_root),
+    evaluation=dict(submit_base,EXPERIMENT_STAGE='evaluation',CALIBRATION_ROOT=str(v3_root),
                     PROCESS_COUNTS='8',LEVELS='3',REFINES='3',RUN_ROOT=str(tmp/'evaluation'))
     scheduled=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=evaluation,
                              capture_output=True,text=True)
     assert scheduled.returncode==0,scheduled.stderr
-    assert (tmp/'evaluation/models/p8.model').read_text()==model
+    assert (tmp/'evaluation/models/p8.model').read_text()==model3
     assert (tmp/'evaluation/models/MODEL_REPORT.md').exists()
+    blocked=dict(evaluation,CALIBRATION_ROOT=str(sample_root),RUN_ROOT=str(tmp/'blocked_v2'))
+    result=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=blocked,capture_output=True,text=True)
+    assert result.returncode!=0 and 'needs new multi-seed calibration' in result.stderr
+    assert 'yhbatch' not in result.stdout
 print('PASS: Slurm spool path, failure continuation, warmup filtering, compressed resume, lossless analysis, cleanup opt-out, failure/active/symlink protection, configuration guard')

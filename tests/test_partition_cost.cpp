@@ -19,6 +19,8 @@ int main() {
             cells[i].face_area.fill(1.0);
             cells[i].face_shape.fill(0.25);
             cells[i].shape_volume=cells[i].volume*0.5;
+            cells[i].shape2_volume=cells[i].volume*0.25;
+            for(int f=0;f<4;++f)cells[i].normal_moment[f]={0.5,0.3,0.2,0.1,0.05,-0.03};
             cells[i].vertices={i+1,i+2,i+3,i+4};
             cells[i].face_vertices={{{i+1,i+2,i+3},{i+2,i+3,i+4},{i+1,i+2,i+4},{i+1,i+3,i+4}}};
             if(i>0)cells[i].neighbor[0]=i-1;
@@ -41,6 +43,12 @@ int main() {
             close(actual[p].inverse_size,result.after[p].inverse_size);
             close(actual[p].shape_volume,result.after[p].shape_volume);
             close(actual[p].boundary_shape,result.after[p].boundary_shape);
+            close(actual[p].area2,result.after[p].area2);close(actual[p].volume2,result.after[p].volume2);
+            close(actual[p].shape2_volume,result.after[p].shape2_volume);
+            close(actual[p].boundary_shape2,result.after[p].boundary_shape2);
+            for(int k=0;k<6;++k)close(actual[p].normal_moment[k],result.after[p].normal_moment[k]);
+            auto x=phase_cost_features(actual[p],cfg),y=phase_cost_features(result.after[p],cfg);
+            for(int k=0;k<phase_features;++k)close(x[k],y[k]);
             assert(actual[p].physical_faces==result.after[p].physical_faces);
         }
         if(repeat==0){assert(result.accepted_moves>0);std::cout<<"heterogeneous fixture: proxy maximum "
@@ -75,6 +83,32 @@ int main() {
             mixed.inverse_size*=2;
             auto a=phase_cost_features(uniform,cfg),b=phase_cost_features(mixed,cfg);
             close(a[2],b[2]);close(2*a[3],b[3]);
+            // Equal first moments can have different size/shape second moments.
+            mixed=uniform;mixed.area2*=2;mixed.boundary_shape2*=2;
+            b=phase_cost_features(mixed,cfg);
+            close(a[2],b[2]);assert(b[8]>a[8]);close(b[10],2*a[10]);
+            seconds_cfg.min_gain_seconds=0;seconds_cfg.model.guarded=true;
+            seconds_cfg.model.maximum.fill(1e100);seconds_cfg.search_seconds=100;
+            candidate=original;
+            auto safe=balance_partition(cells,candidate,2,seconds_cfg);
+            assert(safe.adopted && safe.net_gain_lower_seconds>0 && safe.correction_seconds>=0);
+            // A nominally profitable partition is rejected by measured error.
+            seconds_cfg.model.under_error=100;candidate=original;
+            auto uncertain=balance_partition(cells,candidate,2,seconds_cfg);
+            assert(!uncertain.adopted && candidate==original && (uncertain.rejection_flags&16));
+            assert(uncertain.proposed_moves>0);
+            // Unsupported seed is rejected before costly topology/search work.
+            seconds_cfg.model.maximum[0]=0.5;candidate=original;
+            auto outside=balance_partition(cells,candidate,2,seconds_cfg);
+            assert(outside.search_skipped && (outside.rejection_flags&32) && !outside.proposed_moves);
+            seconds_cfg.model.maximum[0]=1;seconds_cfg.search_seconds=0;
+            auto timed=balance_partition(cells,candidate,2,seconds_cfg);
+            assert(timed.search_skipped && timed.search_timed_out && candidate==original);
+            // Large overprediction makes even the theoretical best candidate
+            // unable to clear the gain test; avoid spending the search budget.
+            seconds_cfg.search_seconds=100;seconds_cfg.model.over_error=1;
+            auto futile=balance_partition(cells,candidate,2,seconds_cfg);
+            assert(futile.search_skipped && (futile.rejection_flags&16));
         }
     }
     // Removing an articulation cell would split its donor component.
@@ -108,5 +142,13 @@ int main() {
         try {PhaseModel model;model.read(in);}catch(const std::runtime_error &){bad=true;}
         assert(bad);
     }
+    std::ostringstream valid;valid<<"mesh_phase_v3 2 2 2 14 4\n";
+    for(int k=0;k<56;++k)valid<<"1 ";
+    valid<<"\n0.2 0.3\n";
+    for(int k=0;k<14;++k)valid<<"0 1000000000000\n";
+    PhaseModel parsed;std::istringstream input(valid.str());parsed.read(input);
+    assert(parsed.guarded && parsed.enabled);close(parsed.lower(10),8);close(parsed.upper(10),13);
+    std::istringstream extra(valid.str()+"nan");
+    try {parsed.read(extra);assert(false);}catch(const std::runtime_error &){}
     std::cout<<"PASS: cost descent, cut budget, connectivity, boundary manifold, conservation, determinism, invalid weights\n";
 }

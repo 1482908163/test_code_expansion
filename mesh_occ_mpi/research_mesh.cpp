@@ -33,6 +33,7 @@ std::vector<mesh_research::CoarseCell> coarse_graph(nglib::Ng_Mesh *mesh) {
             edge2+=(x[u][d]-x[v][d])*(x[u][d]-x[v][d]);
         const double quality=12*std::pow(3*graph[i].volume,2.0/3.0)/edge2;
         graph[i].shape_volume=graph[i].volume*std::max(0.0,1.0/quality-1.0);
+        graph[i].shape2_volume=graph[i].shape_volume*std::max(0.0,1.0/quality-1.0);
         for(int k=0;k<4;++k) {
             int fv[3];double y[3][3];
             nglib::My_Ng_GetFace_Vertices(mesh,fids[k],fv);
@@ -42,6 +43,9 @@ std::vector<mesh_research::CoarseCell> coarse_graph(nglib::Ng_Mesh *mesh) {
             c[0]=a[1]*b[2]-a[2]*b[1];c[1]=a[2]*b[0]-a[0]*b[2];c[2]=a[0]*b[1]-a[1]*b[0];
             graph[i].face_area[k]=0.5*std::sqrt(c[0]*c[0]+c[1]*c[1]+c[2]*c[2]);
             if(graph[i].face_area[k]<=0) throw std::runtime_error("degenerate coarse face");
+            const double denom=4*graph[i].face_area[k];
+            graph[i].normal_moment[k]={c[0]*c[0]/denom,c[1]*c[1]/denom,c[2]*c[2]/denom,
+                c[0]*c[1]/denom,c[0]*c[2]/denom,c[1]*c[2]/denom};
             double edges2=0;
             for(int u=0;u<3;++u) for(int v=u+1;v<3;++v) for(int d=0;d<3;++d)
                 edges2+=(y[u][d]-y[v][d])*(y[u][d]-y[v][d]);
@@ -124,6 +128,12 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
             profile.set_metric("seed_max_seconds",result.seed_max_seconds);
             profile.set_metric("candidate_max_seconds",result.candidate_max_seconds);
             profile.set_metric("partition_rejection_flags",result.rejection_flags);
+            profile.set_metric("seed_lower_seconds",result.seed_lower_seconds);
+            profile.set_metric("candidate_upper_seconds",result.candidate_upper_seconds);
+            profile.set_metric("correction_seconds",result.correction_seconds);
+            profile.set_metric("net_gain_lower_seconds",result.net_gain_lower_seconds);
+            profile.set_metric("search_timed_out",result.search_timed_out?1:0);
+            profile.set_metric("search_skipped",result.search_skipped?1:0);
         } catch(const std::exception &e) {protocol_error(MPI_COMM_WORLD,e.what());}
     }
     // Common to all four ablations: one reproducible seed/label assignment.

@@ -11,6 +11,9 @@ if [[ "${MESH_EXPERIMENT_DRIVER_READY:-0}" != 1 ]]; then
 fi
 
 REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+MESH_SOURCE_REVISION="$(git -C "${REPOSITORY_ROOT}" rev-parse HEAD)"
+[[ -n "${MESH_SOURCE_REVISION}" ]] || { echo "Cannot record source revision" >&2; exit 2; }
+export MESH_SOURCE_REVISION
 export RUN_ROOT="${RUN_ROOT:-${REPOSITORY_ROOT}/strong_scaling_results/mesh_algorithms_$(date +%Y%m%d-%H%M%S)}"
 export START_EPOCH="${START_EPOCH:-$(( $(date +%s)+START_DELAY_SECONDS ))}"
 export MESH_EXPERIMENT_WORKER=1
@@ -22,11 +25,11 @@ for p in "${counts[@]}"; do [[ "${p}" =~ ^[1-9][0-9]*$ ]] || exit 2; done
 mkdir -p "${RUN_ROOT}"
 if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
     [[ -n "${CALIBRATION_ROOT}" && -d "${CALIBRATION_ROOT}" ]] || {
-        echo "Set CALIBRATION_ROOT in run_experiments.sh to the completed second-round calibration directory." >&2
+        echo "Set CALIBRATION_ROOT in run_experiments.sh to the completed v3 multi-seed calibration directory." >&2
         exit 2
     }
     python3 "${SCRIPT_DIR}/fit_cost_model.py" --calibration-root "${CALIBRATION_ROOT}" \
-        --target-ranks "${counts[@]}" --levels "${LEVELS}" --refines "${REFINES}" --output "${RUN_ROOT}/models"
+        --target-ranks "${counts[@]}" --levels "${LEVELS}" --refines "${REFINES}" --output "${RUN_ROOT}/models" --require-v3
 fi
 printf '%s\n' "${counts[@]}" > "${RUN_ROOT}/requested_process_counts.txt"
 failures=0

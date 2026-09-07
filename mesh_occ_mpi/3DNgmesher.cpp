@@ -97,6 +97,7 @@ idx_t *PartitionMetis(void *mesh, int numParts, idx_t *eptr, idx_t *eind, idx_t 
 	idx_t ne; // 网格中的元素数目
 	idx_t nn; // 网格中的节点数目
 	idx_t ncommon = 3;	//两个相邻元素之间的共享节点数目
+	idx_t metis_parts = numParts;
 	idx_t objval;	//划分结果的优化目标值
 	int vrts[4];	//存储元素的节点索引数组
 	int rc; 		// METIS库的返回代码
@@ -107,6 +108,8 @@ idx_t *PartitionMetis(void *mesh, int numParts, idx_t *eptr, idx_t *eind, idx_t 
 
 	METIS_SetDefaultOptions(options);	//设置默认的 METIS 选项
 	options[METIS_OPTION_CONTIG] = 0;
+	if(mesh_research::options().partition_seed>=0)
+		options[METIS_OPTION_SEED]=mesh_research::options().partition_seed;
 	nglib::Ng_Mesh *ngMesh = (nglib::Ng_Mesh *)mesh;
 	nn = nglib::Ng_GetNP(ngMesh);
 	ne = nglib::Ng_GetNE(ngMesh);
@@ -134,8 +137,9 @@ idx_t *PartitionMetis(void *mesh, int numParts, idx_t *eptr, idx_t *eind, idx_t 
 	//  printf("numParts = %d\n", numParts);
 
 	//调用 METIS_PartMeshDual 函数进行网格划分
-	rc = METIS_PartMeshDual(&ne, &nn, eptr, eind, NULL, NULL, &ncommon, &numParts, NULL, options,
+	rc = METIS_PartMeshDual(&ne, &nn, eptr, eind, NULL, NULL, &ncommon, &metis_parts, NULL, options,
 							&objval, edest, ndest);
+	if(rc!=METIS_OK) throw std::runtime_error("METIS mesh partition failed");
 	// printf("MY: metis objval = 9%d\n",objval);
 	// printf("Partipartition succeeded!");
 	//返回 edest 数组，其中包含了元素的目标划分信息

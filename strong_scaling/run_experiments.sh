@@ -16,7 +16,7 @@ export STRONG_SCALING_DIR="${SCRIPT_DIR}"
 # ============================================================================
 EXPERIMENT_PRESET="${EXPERIMENT_PRESET:-production}"
 # 第二轮仍只改本配置区、直接 bash strong_scaling/run_experiments.sh。
-# calibration: 采样（第一轮旧数据缺少新特征，不能直接训练）。
+# calibration: v3 多分区采样（既有八特征数据用于归档，不能补造新特征）。
 # evaluation : 从 CALIBRATION_ROOT 自动冻结排除目标规模的模型，运行四组对照。
 # legacy     : 运行第一轮的几何代理模型，用于方法复查。
 EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-calibration}"
@@ -24,9 +24,20 @@ CALIBRATION_ROOT="${CALIBRATION_ROOT:-}"
 MIN_GAIN_SECONDS="${MIN_GAIN_SECONDS:-0.35}"
 MIN_GAIN_FRACTION="${MIN_GAIN_FRACTION:-0.05}"
 CLOSURE_GROWTH="${CLOSURE_GROWTH:-0}"
+SEARCH_SECONDS="${SEARCH_SECONDS:-0.35}"
 case "${EXPERIMENT_STAGE}" in
-    calibration) default_algorithms="baseline sparse" ;;
-    evaluation|legacy) default_algorithms="baseline balance sparse combined" ;;
+    calibration)
+        default_algorithms="sparse"
+        default_timings="natural"
+        default_seeds="-1 17 41"
+        default_repeats=3
+        ;;
+    evaluation|legacy)
+        default_algorithms="baseline balance sparse combined"
+        default_timings="natural split"
+        default_seeds="-1"
+        default_repeats=5
+        ;;
     *) echo "EXPERIMENT_STAGE must be calibration, evaluation or legacy" >&2; exit 2 ;;
 esac
 case "${EXPERIMENT_PRESET}" in
@@ -47,9 +58,11 @@ esac
 
 PROCESS_COUNTS="${PROCESS_COUNTS:-${default_process_counts}}"
 ALGORITHMS="${ALGORITHMS:-${default_algorithms}}"
-TIMING_MODES="${TIMING_MODES:-natural split}"
+TIMING_MODES="${TIMING_MODES:-${default_timings}}"
+# -1 保留原 METIS 默认；17/41 改变分区，用来检验模型的跨分区预测。
+PARTITION_SEEDS="${PARTITION_SEEDS:-${default_seeds}}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-16}"
-REPEATS="${REPEATS:-5}"
+REPEATS="${REPEATS:-${default_repeats}}"
 WARMUPS="${WARMUPS:-1}"
 LEVELS="${LEVELS:-${default_levels}}"
 REFINES="${REFINES:-${default_refines}}"
@@ -76,6 +89,7 @@ export REPEATS WARMUPS LEVELS REFINES MAXH MINH VERIFY_FACES CLEANUP_RESULTS RES
 export BALANCE_SWEEPS CUT_GROWTH COST_WEIGHTS TIMEOUT_SECONDS START_DELAY_SECONDS
 export PARTITION SBATCH_COMMAND SBATCH_EXTRA_ARGS MPI_LAUNCHER MPI_EXTRA_ARGS DRY_RUN INPUT_PATH
 export EXPERIMENT_STAGE CALIBRATION_ROOT MIN_GAIN_SECONDS MIN_GAIN_FRACTION CLOSURE_GROWTH
+export PARTITION_SEEDS SEARCH_SECONDS
 
 # 登录节点：转入提交驱动；计算作业：继续执行下方 worker（工作进程）逻辑。
 if [[ "${MESH_EXPERIMENT_WORKER:-0}" != 1 ]]; then
@@ -100,6 +114,16 @@ esac
 command -v flock >/dev/null || { echo "Missing flock (run directory locking)" >&2; exit 2; }
 read -r -a algorithms <<< "${ALGORITHMS//,/ }"
 read -r -a timings <<< "${TIMING_MODES//,/ }"
+read -r -a seeds <<< "${PARTITION_SEEDS//,/ }"
+declare -A seen_seeds=()
+for seed in "${seeds[@]}"; do
+    [[ "${seed}" =~ ^(-1|0|[1-9][0-9]*)$ && ${#seed} -le 10 ]] && (( seed<=2147483647 )) || {
+        echo "Invalid partition seed: ${seed}" >&2; exit 2;
+    }
+    [[ -z "${seen_seeds[${seed}]:-}" ]] || { echo "Duplicate partition seed" >&2; exit 2; }
+    seen_seeds[${seed}]=1
+done
+(( ${#seeds[@]} > 0 )) || { echo "Missing partition seeds" >&2; exit 2; }
 read -r -a mpi_extra <<< "${MPI_EXTRA_ARGS}"
 for a in "${algorithms[@]}"; do
     case "$a" in baseline|balance|sparse|combined) ;; *) echo "Unknown algorithm: $a" >&2; exit 2;; esac
@@ -117,7 +141,7 @@ done
 # revisions.  That produces ordinary mesh artifacts but no rank profile, and
 # the failure would otherwise be discovered only after many expensive runs.
 binary_error=""
-for marker in "--profile-core-only" "--algorithm" "research_1" "global_id_bits" "mesh_phase_v2"; do
+for marker in "--profile-core-only" "--algorithm" "research_1" "global_id_bits" "mesh_phase_v3"; do
     if ! LC_ALL=C grep -aFq -- "${marker}" "${BINARY}"; then
         binary_error="missing capability marker ${marker}"
         break
@@ -137,7 +161,9 @@ if [[ -n "${binary_error}" ]]; then
 fi
 export MESH_INPUT_SHA256="$(sha256sum "${INPUT_PATH}" | cut -d ' ' -f1)"
 export MESH_BINARY_SHA256="$(sha256sum "${BINARY}" | cut -d ' ' -f1)"
-export MESH_SOURCE_REVISION="$(git -C "${REPOSITORY_ROOT}" rev-parse HEAD)"
+MESH_SOURCE_REVISION="${MESH_SOURCE_REVISION:-$(git -C "${REPOSITORY_ROOT}" rev-parse HEAD)}"
+[[ -n "${MESH_SOURCE_REVISION}" ]] || { echo "Cannot record source revision" >&2; exit 2; }
+export MESH_SOURCE_REVISION
 export MESH_MODEL_SHA256="none"
 model_args=()
 if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
@@ -147,7 +173,8 @@ if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
         --maxh "${MAXH}" --minh "${MINH}" --threads "${OMP_NUM_THREADS}"
     export MESH_MODEL_SHA256="$(sha256sum "${model}" | cut -d ' ' -f1)"
     model_args=(--phase-model "${model}" --min-gain-seconds "${MIN_GAIN_SECONDS}"
-                --min-gain-fraction "${MIN_GAIN_FRACTION}" --closure-growth "${CLOSURE_GROWTH}")
+                --min-gain-fraction "${MIN_GAIN_FRACTION}" --closure-growth "${CLOSURE_GROWTH}"
+                --search-seconds "${SEARCH_SECONDS}")
 fi
 # Every submitted job has the SAME earliest launch time; no serial dependencies.
 while (( $(date +%s) < ${START_EPOCH:-0} )); do
@@ -158,7 +185,7 @@ done
 pdir="${RUN_ROOT}/p${PROCESS_COUNT}"
 mkdir -p "${pdir}"
 status_file="${pdir}/run_status.tsv"
-[[ -f "${status_file}" ]] || printf 'algorithm\ttiming\trepeat\texit_code\tdirectory\n' > "${status_file}"
+[[ -f "${status_file}" ]] || printf 'algorithm\ttiming\trepeat\texit_code\tdirectory\tpartition_seed\n' > "${status_file}"
 failure_file="${pdir}/failures.log"
 launch=("${MPI_LAUNCHER}" "${mpi_extra[@]}" -n "${PROCESS_COUNT}")
 case "$(basename "${MPI_LAUNCHER}")" in yhrun|srun)
@@ -169,33 +196,39 @@ common=(-i "${INPUT_PATH}" -l "${LEVELS}" -r "${REFINES}" --maxh "${MAXH}" --min
         "${model_args[@]}")
 # Correctness checks deliberately cannot be combined with timing collection.
 if [[ "${VERIFY_FACES}" == 1 ]]; then
+  for seed in "${seeds[@]}"; do
     for a in sparse combined; do
-        checkdir="${pdir}/verify_${a}"
+        checkdir="${pdir}/verify_${a}_seed${seed}"
         mkdir -p "${checkdir}"
         timeout "${TIMEOUT_SECONDS}" "${launch[@]}" "${BINARY}" "${common[@]}" \
-            --algorithm "${a}" --verify-faces -v -o "${checkdir}/" > "${checkdir}/run.log" 2>&1 || exit $?
+            --algorithm "${a}" --partition-seed "${seed}" --verify-faces -v -o "${checkdir}/" > "${checkdir}/run.log" 2>&1 || exit $?
     done
+  done
 fi
-config_text="$(printf '%s\n' "${PROCESS_COUNT}" "${ALGORITHMS}" "${TIMING_MODES}" "${REPEATS}" "${WARMUPS}" "${common[@]}" "OMP_NUM_THREADS=${OMP_NUM_THREADS}" "EXPERIMENT_STAGE=${EXPERIMENT_STAGE}" "MODEL_SHA256=${MESH_MODEL_SHA256}"; sha256sum "${BINARY}" "${INPUT_PATH}")"
+config_text="$(printf '%s\n' "${PROCESS_COUNT}" "${ALGORITHMS}" "${TIMING_MODES}" "${REPEATS}" "${WARMUPS}" "${common[@]}" "PARTITION_SEEDS=${PARTITION_SEEDS}" "SOURCE_REVISION=${MESH_SOURCE_REVISION}" "OMP_NUM_THREADS=${OMP_NUM_THREADS}" "EXPERIMENT_STAGE=${EXPERIMENT_STAGE}" "MODEL_SHA256=${MESH_MODEL_SHA256}"; sha256sum "${BINARY}" "${INPUT_PATH}")"
 if [[ -f "${pdir}/configuration.txt" && "$(cat "${pdir}/configuration.txt")" != "${config_text}" ]]; then
     echo "Existing results use another configuration; choose a new RUN_ROOT." >&2
     exit 2
 fi
 printf '%s\n' "${config_text}" > "${pdir}/configuration.txt"
-python3 - "${pdir}/plan.json" "${PROCESS_COUNT}" "${REPEATS}" "${ALGORITHMS}" "${TIMING_MODES}" <<'PLAN'
+python3 - "${pdir}/plan.json" "${PROCESS_COUNT}" "${REPEATS}" "${ALGORITHMS}" "${TIMING_MODES}" "${PARTITION_SEEDS}" <<'PLAN'
 import json,pathlib,sys
-path,n,repeats,algorithms,timings=sys.argv[1:]
+path,n,repeats,algorithms,timings,seeds=sys.argv[1:]
 pathlib.Path(path).write_text(json.dumps(dict(ranks=int(n), repeats=int(repeats),
-    algorithms=algorithms.replace(',', ' ').split(), timings=timings.replace(',', ' ').split())))
+    algorithms=algorithms.replace(',', ' ').split(), timings=timings.replace(',', ' ').split(),
+    partition_seeds=list(map(int,seeds.replace(',', ' ').split())))))
 PLAN
 failures=0
 # Negative/zero repeats are warmups. Rotate mode order to avoid always giving
 # one algorithm the first file-cache/allocator state. No cache eviction code.
 for ((rep=1-WARMUPS;rep<=REPEATS;++rep)); do
+  for ((s=0;s<${#seeds[@]};++s)); do
+    seed="${seeds[$(( (s+rep+WARMUPS-1)%${#seeds[@]} ))]}"
     for mode in "${timings[@]}"; do
         for ((j=0;j<${#algorithms[@]};++j)); do
             a="${algorithms[$(( (j+rep+WARMUPS-1)%${#algorithms[@]} ))]}"
             out="${pdir}/${a}_${mode}/repeat_${rep}"
+            [[ "${seed}" == -1 ]] || out="${pdir}/${a}_seed${seed}_${mode}/repeat_${rep}"
             mkdir -p "${out}"
             exec 9>>"${out}/.run.lock"
             if ! flock -n 9; then
@@ -208,7 +241,7 @@ for ((rep=1-WARMUPS;rep<=REPEATS;++rep)); do
             fi
             rm -f "${out}/SUCCESS" "${out}/rank_profiles.jsonl" "${out}/rank_profiles.jsonl.gz" "${out}/run.log.gz"
             touch "${out}/RUNNING"
-            args=("${common[@]}" --algorithm "${a}" --profile-core-only --profile-dir "${out}"
+            args=("${common[@]}" --algorithm "${a}" --partition-seed "${seed}" --profile-core-only --profile-dir "${out}"
                   --profile-experiment "${a}" --profile-repeat "${rep}" -o "${out}/mesh/")
             [[ "${mode}" == natural ]] && args+=(--profile-natural)
             rc=0
@@ -219,15 +252,16 @@ for ((rep=1-WARMUPS;rep<=REPEATS;++rep)); do
                 finalize_error=""
                 if ! finalize_error="$(python3 "${SCRIPT_DIR}/analyze_results.py" "${out}" --finish-run "${cleanup_args[@]}" 2>&1)"; then
                     rc=1
-                    printf '%s/%s repeat %s: %s\n' "${a}" "${mode}" "${rep}" "${finalize_error}" >> "${failure_file}"
+                    printf '%s/%s seed %s repeat %s: %s\n' "${a}" "${mode}" "${seed}" "${rep}" "${finalize_error}" >> "${failure_file}"
                 fi
             fi
             if ((rc!=0)); then
                 failures=$((failures+1))
             fi
-            printf '%s\t%s\t%s\t%s\t%s\n' "${a}" "${mode}" "${rep}" "${rc}" "${out}" >> "${status_file}"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${a}" "${mode}" "${rep}" "${rc}" "${out}" "${seed}" >> "${status_file}"
         done
     done
+  done
 done
 python3 "${SCRIPT_DIR}/analyze_results.py" "${pdir}" "${cleanup_args[@]}" || exit $?
 ((failures==0)) || exit 1

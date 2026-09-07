@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <fstream>
 #include <numeric>
 #include <map>
@@ -10,10 +11,15 @@
 #include <vector>
 
 namespace mesh_research {
-constexpr int phase_features = 8, phase_count = 4;
+constexpr int phase_features = 14, phase_count = 4;
 struct PhaseModel {
     bool enabled = false;
+    bool guarded = false;
     int levels = 0, refines = 0, held_out_ranks = 0;
+    // Worst one-sided relative residuals from whole-group held-out predictions.
+    // Empirical envelopes, NOT confidence bounds on an unseen partition.
+    double over_error = 0, under_error = 0;
+    std::array<double,phase_features> minimum{}, maximum{};
     std::array<std::array<double,phase_features>,phase_count> coefficients{};
     void read(const std::string &path) {
         std::ifstream in(path);read(in);
@@ -22,18 +28,40 @@ struct PhaseModel {
         std::string magic, extra;
         int features=0, phases=0;
         if(!(in>>magic>>levels>>refines>>held_out_ranks>>features>>phases) ||
-           magic!="mesh_phase_v2" || features!=phase_features || phases!=phase_count)
+           !((magic=="mesh_phase_v2" && features==8) ||
+             (magic=="mesh_phase_v3" && features==phase_features)) || phases!=phase_count)
             throw std::runtime_error("invalid phase model header");
+        enabled=false; guarded=magic=="mesh_phase_v3"; coefficients={};
         double total=0;
-        for(auto &phase:coefficients) for(double &w:phase) {
+        for(auto &phase:coefficients) for(int j=0;j<features;++j) {
+            double &w=phase[j];
             if(!(in>>w) || !std::isfinite(w) || w<0)
                 throw std::runtime_error("invalid phase coefficient");
             total+=w;
+        }
+        if(guarded) {
+            if(!(in>>over_error>>under_error) || !std::isfinite(over_error) ||
+               !std::isfinite(under_error) || over_error<0 || under_error<0)
+                throw std::runtime_error("invalid residual envelope");
+            for(int j=0;j<phase_features;++j)
+                if(!(in>>minimum[j]>>maximum[j]) || !std::isfinite(minimum[j]) ||
+                   !std::isfinite(maximum[j]) || minimum[j]<0 || maximum[j]<minimum[j])
+                    throw std::runtime_error("invalid training feature range");
         }
         if(in>>extra || total<=0 || !std::isfinite(total))
             throw std::runtime_error("invalid phase model contents");
         enabled=true;
     }
+    bool supports(const std::array<double,phase_features> &x) const {
+        if(!guarded) return true;
+        for(int j=0;j<phase_features;++j) {
+            if(!std::isfinite(x[j]) || x[j]<minimum[j]-1e-8*std::max(1.0,minimum[j]) ||
+               x[j]>maximum[j]+1e-8*std::max(1.0,maximum[j])) return false;
+        }
+        return true;
+    }
+    double lower(double prediction) const {return prediction*std::max(0.0,1-over_error);}
+    double upper(double prediction) const {return prediction*(1+under_error);}
 };
 struct CostConfig {
     int levels = 0, refines = 0, sweeps = 4;
@@ -45,6 +73,7 @@ struct CostConfig {
     // Frozen experiment parameters, NOT a guarantee of measured improvement.
     double min_gain_seconds = 0.35, min_gain_fraction = 0.05;
     double closure_growth = 0.0;
+    double search_seconds = 0.35;
 };
 struct CoarseCell {
     std::array<int,4> vertices{};
@@ -53,6 +82,9 @@ struct CoarseCell {
     std::array<double,4> face_area{};
     std::array<double,4> face_shape{};
     double shape_volume = 0;
+    double shape2_volume = 0;
+    // xx, yy, zz, xy, xz, yz of area * unit_normal * unit_normal^T.
+    std::array<std::array<double,6>,4> normal_moment{};
     std::array<int,4> neighbor{-1,-1,-1,-1};
 };
 struct PartCost {
@@ -60,6 +92,8 @@ struct PartCost {
     double volume = 0, area = 0;
     double inverse_size = 0, boundary_shape = 0, shape_volume = 0;
     int physical_faces = 0;
+    double area2 = 0, volume2 = 0, boundary_shape2 = 0, shape2_volume = 0;
+    std::array<double,6> normal_moment{};
 };
 struct BalanceResult {
     std::vector<PartCost> before, after;
@@ -69,7 +103,10 @@ struct BalanceResult {
     bool adopted = false;
     double seed_max_seconds = 0, candidate_max_seconds = 0;
     long long candidate_closure = 0, candidate_closure_max = 0;
-    int rejection_flags = 0; // 1: gain, 2: total closure, 4: max closure, 8: no moves
+    int rejection_flags = 0; // 1: gain, 2/4: closure, 8: no moves, 16: error/net gain, 32: range
+    double seed_lower_seconds = 0, candidate_upper_seconds = 0, correction_seconds = 0;
+    double net_gain_lower_seconds = 0;
+    bool search_timed_out = false, search_skipped = false;
 };
 inline std::array<double,4> cost_features(const PartCost &p, const CostConfig &c) {
     if (p.cells == 0) return {0,0,0,0};
@@ -93,8 +130,16 @@ inline std::array<double,phase_features> phase_cost_features(const PartCost &p,c
     const double g=std::pow(4.0,c.levels);
     const double tail=p.volume*(12.0/std::sqrt(2.0))*
         std::pow(std::sqrt(3.0)*g/4.0,1.5)*std::max(0.0,p.inverse_size)/p.area;
+    const double area_cv2=std::max(0.0,p.faces*p.area2/(p.area*p.area)-1);
+    const double volume_cv2=std::max(0.0,p.cells*p.volume2/(p.volume*p.volume)-1);
+    const auto &m=p.normal_moment;
+    const double trace2=m[0]*m[0]+m[1]*m[1]+m[2]*m[2]+2*(m[3]*m[3]+m[4]*m[4]+m[5]*m[5]);
+    const double anisotropy=std::clamp(1.5*(trace2/(p.area*p.area)-1.0/3),0.0,1.0);
+    const double defect=std::max(0.0,std::pow(p.area,1.5)/(6*std::sqrt(std::acos(-1.0))*p.volume)-1);
     return {1.0,p.faces*g,old[1],tail,old[1]*std::max(0.0,p.shape_volume)/p.volume,
-        std::max(0.0,p.boundary_shape)*g,p.physical_faces*g,static_cast<double>(p.cells)};
+        std::max(0.0,p.boundary_shape)*g,p.physical_faces*g,static_cast<double>(p.cells),
+        old[1]*area_cv2,old[1]*volume_cv2,g*std::max(0.0,p.boundary_shape2),
+        old[1]*std::max(0.0,p.shape2_volume)/p.volume,p.faces*g*defect,p.faces*g*anisotropy};
 }
 inline std::array<double,phase_count> predicted_phases(const PartCost &p,const CostConfig &c) {
     const auto x=phase_cost_features(p,c);
@@ -122,6 +167,9 @@ inline void boundary_delta(PartCost &p,const CoarseCell &cell,int face,int delta
     p.faces+=delta; p.area+=delta*area;
     p.inverse_size+=delta/std::sqrt(area);
     p.boundary_shape+=delta*cell.face_shape[face];
+    p.area2+=delta*area*area;
+    p.boundary_shape2+=delta*cell.face_shape[face]*cell.face_shape[face];
+    for(int k=0;k<6;++k)p.normal_moment[k]+=delta*cell.normal_moment[face][k];
     if(cell.neighbor[face]<0) p.physical_faces+=delta;
 }
 inline std::vector<PartCost> partition_stats(const std::vector<CoarseCell> &cells,
@@ -132,6 +180,7 @@ inline std::vector<PartCost> partition_stats(const std::vector<CoarseCell> &cell
         if (part[i]<0 || part[i]>=count) throw std::runtime_error("invalid partition label");
         auto &p=stats[part[i]];
         ++p.cells; p.volume+=cells[i].volume; p.shape_volume+=cells[i].shape_volume;
+        p.volume2+=cells[i].volume*cells[i].volume; p.shape2_volume+=cells[i].shape2_volume;
         for (int k=0;k<4;++k) {
             int n=cells[i].neighbor[k];
             if (n>=static_cast<int>(cells.size())) throw std::runtime_error("invalid neighbor");
@@ -231,7 +280,7 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
     if(config.model.enabled && (config.model.levels!=config.levels ||
         config.model.refines!=config.refines || config.model.held_out_ranks!=count))
         throw std::runtime_error("phase model does not match levels/refines/held-out rank count");
-    for(double v:{config.min_gain_seconds,config.min_gain_fraction,config.closure_growth})
+    for(double v:{config.min_gain_seconds,config.min_gain_fraction,config.closure_growth,config.search_seconds})
         if(!std::isfinite(v) || v<0) throw std::runtime_error("invalid candidate selection budget");
     for(double w:config.weights)
         if(!std::isfinite(w)||w<0) throw std::runtime_error("invalid cost weights");
@@ -242,9 +291,28 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
     for(const auto &p:result.before) if(p.cells==0) throw std::runtime_error("empty METIS partition");
     result.cut_before=cut_faces(cells,part); result.cut_after=result.cut_before;
     if(!optimize) return result;
+    const auto start=std::chrono::steady_clock::now();
+    const auto elapsed=[&](){return std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();};
     const auto seed=part;
     double seed_max=0;
     for(const auto &p:result.before) seed_max=std::max(seed_max,predicted_cost(p,config));
+    const double required=std::max(config.min_gain_seconds,config.min_gain_fraction*seed_max);
+    result.seed_max_seconds=seed_max;
+    if(config.model.guarded) {
+        result.seed_lower_seconds=config.model.lower(seed_max);
+        for(const auto &p:result.before) if(!config.model.supports(phase_cost_features(p,config)))
+            result.rejection_flags|=32;
+        double intercept=0;
+        for(const auto &phase:config.model.coefficients)intercept+=phase[0];
+        // Nonnegative coefficients give a necessary condition for any supported
+        // candidate to clear the net-gain test. Avoid futile closure/search work.
+        if(result.seed_lower_seconds-config.model.upper(intercept)<=required)
+            result.rejection_flags|=16;
+        if(result.rejection_flags || config.search_seconds==0) {
+            result.search_skipped=true;result.search_timed_out=config.search_seconds==0;
+            result.correction_seconds=elapsed();return result;
+        }
+    }
     if(config.model.enabled) {
         const auto d=dependency_volume(cells,seed,count);
         result.closure_before=d.first; result.closure_max_before=d.second;
@@ -265,6 +333,9 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
         });
         long long moves=0;
         for(int i:order) {
+            if(config.model.guarded && elapsed()>=config.search_seconds) {
+                result.search_timed_out=true;break;
+            }
             const int from=part[i];
             if(result.after[from].cells<=1) continue;
             std::set<int> targets;
@@ -277,6 +348,8 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
                 --a.cells; ++b.cells;
                 a.volume-=cells[i].volume; b.volume+=cells[i].volume;
                 a.shape_volume-=cells[i].shape_volume; b.shape_volume+=cells[i].shape_volume;
+                a.shape2_volume-=cells[i].shape2_volume; b.shape2_volume+=cells[i].shape2_volume;
+                a.volume2-=cells[i].volume*cells[i].volume; b.volume2+=cells[i].volume*cells[i].volume;
                 int cut_delta=0;
                 for(int k=0;k<4;++k) {
                     const int n=cells[i].neighbor[k];
@@ -288,6 +361,8 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
                 }
                 if(result.cut_after+cut_delta>budget || a.area<=0 || b.area<=0 ||
                    a.volume<=0 || b.volume<=0 || a.faces<=0 || b.faces<=0) continue;
+                if(!config.model.supports(phase_cost_features(a,config)) ||
+                   !config.model.supports(phase_cost_features(b,config))) continue;
                 const double wa=predicted_cost(a,config),wb=predicted_cost(b,config);
                 const double old_max=std::max(work[from],work[to]);
                 if(std::max(wa,wb)>old_max) continue;
@@ -304,7 +379,7 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
             work[from]=best_a;work[best_to]=best_b;result.cut_after+=best_cut;
             ++moves;++result.accepted_moves;
         }
-        if(!moves) break;
+        if(!moves || result.search_timed_out) break;
     }
     result.proposed_moves=result.accepted_moves;
     result.adopted=result.accepted_moves>0;
@@ -312,13 +387,18 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
         const auto d=dependency_volume(cells,part,count);
         result.closure_after=d.first; result.closure_max_after=d.second;
         const double candidate_max=*std::max_element(work.begin(),work.end());
-        const double required=std::max(config.min_gain_seconds,config.min_gain_fraction*seed_max);
         result.seed_max_seconds=seed_max;result.candidate_max_seconds=candidate_max;
         result.candidate_closure=d.first;result.candidate_closure_max=d.second;
         if(seed_max-candidate_max<=required)result.rejection_flags|=1;
         if(d.first>result.closure_before*(1+config.closure_growth))result.rejection_flags|=2;
         if(d.second>result.closure_max_before*(1+config.closure_growth))result.rejection_flags|=4;
         if(!result.accepted_moves)result.rejection_flags|=8;
+        if(config.model.guarded) {
+            result.candidate_upper_seconds=config.model.upper(candidate_max);
+            result.correction_seconds=elapsed();
+            result.net_gain_lower_seconds=result.seed_lower_seconds-result.candidate_upper_seconds-result.correction_seconds;
+            if(result.net_gain_lower_seconds<=required)result.rejection_flags|=16;
+        }
         result.adopted=result.rejection_flags==0;
         if(!result.adopted) {
             part=seed;result.after=result.before;result.cut_after=result.cut_before;
@@ -326,6 +406,7 @@ inline BalanceResult balance_partition(const std::vector<CoarseCell> &cells,
             result.closure_max_after=result.closure_max_before;
         }
     }
+    result.correction_seconds=elapsed();
     return result;
 }
 } // namespace mesh_research

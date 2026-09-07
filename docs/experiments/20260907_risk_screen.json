@@ -1,0 +1,119 @@
+{
+  "source_commit": "445e6f49f33dbd3c8023476461688a905bc2b21f",
+  "source_directory": "strong_scaling_results/mesh_algorithms_20260907-132958",
+  "experiment": "Retrospective v2 error-envelope diagnostic; NOT v3 training or runtime measurement",
+  "results": [
+    {
+      "target_ranks": 1024,
+      "training_ranks": [
+        2048,
+        4096,
+        8192
+      ],
+      "error_envelope": {
+        "over": 0.6331220137940584,
+        "under": 0.445543706702606
+      },
+      "seed_prediction_max": 15.157031934311945,
+      "seed_empirical_lower": 5.560781352919514,
+      "candidate_intercept_upper_floor": 5.669274724798174,
+      "minimum_gain": 0.7578515967155973,
+      "necessary_gain_ceiling": -0.10849337187866048,
+      "prescreen_would_skip": true,
+      "score": {
+        "surface_wape": 0.05548236245041306,
+        "remesh_wape": 0.14597969832211424,
+        "refine_wape": 0.09590512719501552,
+        "adjacency_numbering_wape": 0.2438784739951271,
+        "compute_wape": 0.10669089460556662,
+        "actual_slowest_rank_relative_error": -0.11456863309632274,
+        "predicted_max_relative_error": 0.053506927072604744,
+        "slowest_one_percent_recall": 0.09090909090909091
+      }
+    },
+    {
+      "target_ranks": 2048,
+      "training_ranks": [
+        1024,
+        4096,
+        8192
+      ],
+      "error_envelope": {
+        "over": 0.6372273830374371,
+        "under": 0.4673396362923307
+      },
+      "seed_prediction_max": 10.85157994432453,
+      "seed_empirical_lower": 3.9366560545810727,
+      "candidate_intercept_upper_floor": 6.0189207311818,
+      "minimum_gain": 0.5425789972162266,
+      "necessary_gain_ceiling": -2.0822646766007273,
+      "prescreen_would_skip": true,
+      "score": {
+        "surface_wape": 0.02309065641395047,
+        "remesh_wape": 0.059263109959245545,
+        "refine_wape": 0.07618574107017229,
+        "adjacency_numbering_wape": 0.20387417961301946,
+        "compute_wape": 0.05330076724674371,
+        "actual_slowest_rank_relative_error": -0.26658485692446493,
+        "predicted_max_relative_error": 0.03928318015396526,
+        "slowest_one_percent_recall": 0.14285714285714285
+      }
+    },
+    {
+      "target_ranks": 4096,
+      "training_ranks": [
+        1024,
+        2048,
+        8192
+      ],
+      "error_envelope": {
+        "over": 0.6629212335229788,
+        "under": 0.4227898162781069
+      },
+      "seed_prediction_max": 7.967042847835944,
+      "seed_empirical_lower": 2.6855209756181138,
+      "candidate_intercept_upper_floor": 5.660353452116916,
+      "minimum_gain": 0.3983521423917972,
+      "necessary_gain_ceiling": -2.9748324764988023,
+      "prescreen_would_skip": true,
+      "score": {
+        "surface_wape": 0.02773164408778888,
+        "remesh_wape": 0.09992185842390268,
+        "refine_wape": 0.11404548164760461,
+        "adjacency_numbering_wape": 0.1641942763270369,
+        "compute_wape": 0.08281717245922962,
+        "actual_slowest_rank_relative_error": -0.28480353217761084,
+        "predicted_max_relative_error": -0.18678493319143905,
+        "slowest_one_percent_recall": 0.17073170731707318
+      }
+    },
+    {
+      "target_ranks": 8192,
+      "training_ranks": [
+        1024,
+        2048,
+        4096
+      ],
+      "error_envelope": {
+        "over": 0.37441915339798243,
+        "under": 0.3751510324602026
+      },
+      "seed_prediction_max": 7.428929085498838,
+      "seed_empirical_lower": 4.647395746652716,
+      "candidate_intercept_upper_floor": 6.382949991116994,
+      "minimum_gain": 0.37144645427494194,
+      "necessary_gain_ceiling": -1.7355542444642778,
+      "prescreen_would_skip": true,
+      "score": {
+        "surface_wape": 0.030987922063409938,
+        "remesh_wape": 0.1898038237896312,
+        "refine_wape": 0.13835769317149205,
+        "adjacency_numbering_wape": 0.17409494771453995,
+        "compute_wape": 0.17680007198406889,
+        "actual_slowest_rank_relative_error": -0.25952469662393407,
+        "predicted_max_relative_error": -0.1314832005826087,
+        "slowest_one_percent_recall": 0.17073170731707318
+      }
+    }
+  ]
+}
