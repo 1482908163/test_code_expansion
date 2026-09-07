@@ -1,0 +1,335 @@
+{
+  "analysis_date": "2026-09-07",
+  "data_commit": "445e6f49f33dbd3c8023476461688a905bc2b21f",
+  "method_commit": "d15511eef34ba7da44d0491e0e16e931f1bdb492",
+  "data_root": "strong_scaling_results/mesh_algorithms_20260907-132958",
+  "scope": "Offline leave-process-count-out prediction validation on calibration samples; not end-to-end balanced mesh generation.",
+  "protocol": {
+    "training_algorithm": "sparse",
+    "training_mode": "natural",
+    "measured_repeats": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "aggregation": "Per rank and phase median across repeats; total compute is sum of four phase medians.",
+    "leave_out": "All rows of the target process count excluded from fitting and feature scaling.",
+    "solver": "Existing nonnegative RMS-scaled ridge, lambda=1e-4, equal total weight per training process count.",
+    "control": "Same solver with constant and mean_spacing_volume only.",
+    "top1percent_recall": "Intersection of predicted and actual slowest ceil(0.01*P) rank sets / ceil(0.01*P)."
+  },
+  "samples": [
+    {
+      "path": "strong_scaling_results/mesh_algorithms_20260907-132958/p1024/analysis/model_samples.csv.gz",
+      "git_blob_sha": "2194fe0cea2a1592cbcc2e9d3ee0063aeb55bcbb",
+      "size": 1028353
+    },
+    {
+      "path": "strong_scaling_results/mesh_algorithms_20260907-132958/p2048/analysis/model_samples.csv.gz",
+      "git_blob_sha": "4582aa66e38bddabbd9b12d251905e92751cb7e5",
+      "size": 2036784
+    },
+    {
+      "path": "strong_scaling_results/mesh_algorithms_20260907-132958/p4096/analysis/model_samples.csv.gz",
+      "git_blob_sha": "34d70e3d349954143c21619088db501f249ad737",
+      "size": 4043686
+    },
+    {
+      "path": "strong_scaling_results/mesh_algorithms_20260907-132958/p8192/analysis/model_samples.csv.gz",
+      "git_blob_sha": "5f90f353965affc689612cf4c4e265cf3b520c91",
+      "size": 8061960
+    }
+  ],
+  "results": [
+    {
+      "ranks": 1024,
+      "new": {
+        "surface_wape": 0.05548236245041306,
+        "remesh_wape": 0.14597969832211424,
+        "refine_wape": 0.09590512719501552,
+        "adjacency_numbering_wape": 0.2438784739951271,
+        "compute_wape": 0.10669089460556662,
+        "actual_slowest_rank_relative_error": -0.11456863309632274,
+        "predicted_max_relative_error": 0.053506927072604744
+      },
+      "control": {
+        "surface_wape": 0.06281564983603474,
+        "remesh_wape": 0.1747291104299919,
+        "refine_wape": 0.10958510698238176,
+        "adjacency_numbering_wape": 0.2560561195731542,
+        "compute_wape": 0.13758775288573494,
+        "actual_slowest_rank_relative_error": -0.21051875880003576,
+        "predicted_max_relative_error": 0.05656317282955892
+      },
+      "actual_max_seconds": 14.38721620599972,
+      "predicted_max_seconds": 15.157031934311945,
+      "actual_slowest_rank": 501,
+      "predicted_at_actual_slowest_seconds": 12.73889251121707,
+      "predicted_slowest_rank": 243,
+      "actual_at_predicted_slowest_seconds": 12.430279391000113,
+      "corr_compute": 0.8051491807752573,
+      "corr_remesh": 0.7059010608078898,
+      "top1percent_recall": 0.09090909090909091,
+      "coefficients": [
+        [
+          0.013724925671716246,
+          0.000002488419198055931,
+          4.652568282103809e-8,
+          1.7443132224409245e-8,
+          0,
+          0,
+          2.837867378707691e-8,
+          0.00013221732451089836
+        ],
+        [
+          3.9041132128686264,
+          0.0005602568167751716,
+          0.000039069284263841464,
+          0,
+          0.000014541937636597898,
+          0.004077741084300152,
+          0.00020778772035605567,
+          0.07516371326123884
+        ],
+        [
+          0,
+          0.0002993495251244249,
+          0.00009694875507078813,
+          0.000007294034492156898,
+          0,
+          0,
+          0.00020368459993194671,
+          0.034791004889509716
+        ],
+        [
+          0.004059690291285095,
+          0.000004414740457465469,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0.0020846990923400507
+        ]
+      ]
+    },
+    {
+      "ranks": 2048,
+      "new": {
+        "surface_wape": 0.02309065641395047,
+        "remesh_wape": 0.059263109959245545,
+        "refine_wape": 0.07618574107017229,
+        "adjacency_numbering_wape": 0.20387417961301946,
+        "compute_wape": 0.05330076724674371,
+        "actual_slowest_rank_relative_error": -0.26658485692446493,
+        "predicted_max_relative_error": 0.03928318015396526
+      },
+      "control": {
+        "surface_wape": 0.032275807144663056,
+        "remesh_wape": 0.07097208983108028,
+        "refine_wape": 0.09526696425362337,
+        "adjacency_numbering_wape": 0.2303011400733312,
+        "compute_wape": 0.06877869255778092,
+        "actual_slowest_rank_relative_error": -0.2754363565764504,
+        "predicted_max_relative_error": -0.155137658265513
+      },
+      "actual_max_seconds": 10.441408224000043,
+      "predicted_max_seconds": 10.85157994432453,
+      "actual_slowest_rank": 705,
+      "predicted_at_actual_slowest_seconds": 7.65788690651506,
+      "predicted_slowest_rank": 1251,
+      "actual_at_predicted_slowest_seconds": 8.896912039999734,
+      "corr_compute": 0.6736139047571686,
+      "corr_remesh": 0.5613698668985085,
+      "top1percent_recall": 0.14285714285714285,
+      "coefficients": [
+        [
+          0.013096013634741197,
+          0.000004287242727370135,
+          0,
+          0,
+          1.5252760173944228e-8,
+          0,
+          8.816327883830647e-7,
+          0
+        ],
+        [
+          4.086700796542222,
+          0.0008101607727178528,
+          0.00003960579849879912,
+          0,
+          0.00005572378742803624,
+          0.003720716580921736,
+          0.0003843684289761555,
+          0
+        ],
+        [
+          0,
+          0.0004252104783606637,
+          0.00008500047746599137,
+          0.00005203075022368567,
+          0,
+          0,
+          0.0003186648912961261,
+          0.002037108207726315
+        ],
+        [
+          0.0021306388697965913,
+          0.000015983370650715086,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0.0008217352847596464
+        ]
+      ]
+    },
+    {
+      "ranks": 4096,
+      "new": {
+        "surface_wape": 0.02773164408778888,
+        "remesh_wape": 0.09992185842390268,
+        "refine_wape": 0.11404548164760461,
+        "adjacency_numbering_wape": 0.1641942763270369,
+        "compute_wape": 0.08281717245922962,
+        "actual_slowest_rank_relative_error": -0.28480353217761084,
+        "predicted_max_relative_error": -0.18678493319143905
+      },
+      "control": {
+        "surface_wape": 0.024794771550042893,
+        "remesh_wape": 0.10467438975186162,
+        "refine_wape": 0.08493015534552803,
+        "adjacency_numbering_wape": 0.18084230493243578,
+        "compute_wape": 0.09132314192400355,
+        "actual_slowest_rank_relative_error": -0.4017420596406939,
+        "predicted_max_relative_error": -0.3073960879641905
+      },
+      "actual_max_seconds": 9.79696905899982,
+      "predicted_max_seconds": 7.967042847835944,
+      "actual_slowest_rank": 2053,
+      "predicted_at_actual_slowest_seconds": 7.006757666361907,
+      "predicted_slowest_rank": 2955,
+      "actual_at_predicted_slowest_seconds": 7.091792937999799,
+      "corr_compute": 0.3635228718193926,
+      "corr_remesh": 0.32787730364681494,
+      "top1percent_recall": 0.17073170731707318,
+      "coefficients": [
+        [
+          0.013284939411183971,
+          0.000004273907326757385,
+          0,
+          0,
+          1.7865021465079158e-8,
+          0,
+          7.031075372998189e-7,
+          0
+        ],
+        [
+          3.961627833986043,
+          0.0011004026575065344,
+          0.000013038750074427431,
+          0,
+          0.00008782901877247918,
+          0.0031728837042051426,
+          0.0003387992936423782,
+          0
+        ],
+        [
+          0,
+          0.0005294126733476124,
+          0.00008790636015902279,
+          0.00003708735545198349,
+          0,
+          0,
+          0.00031164351657547197,
+          0
+        ],
+        [
+          0.0034355303064803064,
+          0.00001582401370070426,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0.0008193916229396652
+        ]
+      ]
+    },
+    {
+      "ranks": 8192,
+      "new": {
+        "surface_wape": 0.030987922063409938,
+        "remesh_wape": 0.1898038237896312,
+        "refine_wape": 0.13835769317149205,
+        "adjacency_numbering_wape": 0.17409494771453995,
+        "compute_wape": 0.17680007198406889,
+        "actual_slowest_rank_relative_error": -0.25952469662393407,
+        "predicted_max_relative_error": -0.1314832005826087
+      },
+      "control": {
+        "surface_wape": 0.020509142621638006,
+        "remesh_wape": 0.1967419943256884,
+        "refine_wape": 0.12224300232023948,
+        "adjacency_numbering_wape": 0.40838668292005753,
+        "compute_wape": 0.1835939672034352,
+        "actual_slowest_rank_relative_error": -0.30570207735359434,
+        "predicted_max_relative_error": -0.267775715606426
+      },
+      "actual_max_seconds": 8.553581335999752,
+      "predicted_max_seconds": 7.428929085498838,
+      "actual_slowest_rank": 155,
+      "predicted_at_actual_slowest_seconds": 6.333715734726272,
+      "predicted_slowest_rank": 2213,
+      "actual_at_predicted_slowest_seconds": 7.512105471000268,
+      "corr_compute": 0.17947731684755816,
+      "corr_remesh": 0.1596393873452184,
+      "top1percent_recall": 0.17073170731707318,
+      "coefficients": [
+        [
+          0.012721321125066772,
+          0.000004573555816353357,
+          0,
+          0,
+          5.38500746809562e-8,
+          0,
+          5.567070906240018e-7,
+          0
+        ],
+        [
+          4.624290436374526,
+          0.0005592472868224141,
+          0.00004637639908015903,
+          0,
+          0.000057913966123629367,
+          0.003229381697597241,
+          0.00042144156969839175,
+          0
+        ],
+        [
+          0,
+          0.0004966612839661359,
+          0.00009203046541143343,
+          0.00003688563522876457,
+          0,
+          0,
+          0.00029673807215296,
+          0.0010953662834233139
+        ],
+        [
+          0.004623845025919855,
+          0.000013985291656239006,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0.0009179486523759346
+        ]
+      ]
+    }
+  ]
+}
