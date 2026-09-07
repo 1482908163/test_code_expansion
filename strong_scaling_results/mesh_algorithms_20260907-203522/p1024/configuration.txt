@@ -1,0 +1,29 @@
+1024
+sparse
+natural
+3
+1
+-i
+/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+-l
+3
+-r
+3
+--maxh
+1000
+--minh
+0
+-adj
+--balance-sweeps
+4
+--cut-growth
+0.05
+--cost-weights
+1,1,1,1
+PARTITION_SEEDS=-1 17 41
+SOURCE_REVISION=409bac26f4ba1eb00ab4c993d7801a72914175c3
+OMP_NUM_THREADS=1
+EXPERIMENT_STAGE=calibration
+MODEL_SHA256=none
+aba69cae443f6ec56c3330c35e9108cfebbfc97c0d82f8a3386fcfaeccbb8d6f  /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/build/mesh_occ_mpi/mesh_occ_mpi
+8193db1235a9d0dc24d19dd3b9a4dafccfe62d6667ab5a395f72b30a02339547  /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP

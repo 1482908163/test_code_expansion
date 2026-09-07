@@ -1,0 +1,13 @@
+algorithm	timing	repeat	exit_code	directory	partition_seed
+sparse	natural	0	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_natural/repeat_0	-1
+sparse	natural	0	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_seed17_natural/repeat_0	17
+sparse	natural	0	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_seed41_natural/repeat_0	41
+sparse	natural	1	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_seed17_natural/repeat_1	17
+sparse	natural	1	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_seed41_natural/repeat_1	41
+sparse	natural	1	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_natural/repeat_1	-1
+sparse	natural	2	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_seed41_natural/repeat_2	41
+sparse	natural	2	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_natural/repeat_2	-1
+sparse	natural	2	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_seed17_natural/repeat_2	17
+sparse	natural	3	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_natural/repeat_3	-1
+sparse	natural	3	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_seed17_natural/repeat_3	17
+sparse	natural	3	0	/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/strong_scaling_results/mesh_algorithms_20260907-203522/p1024/sparse_seed41_natural/repeat_3	41
