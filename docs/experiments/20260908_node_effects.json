@@ -1,0 +1,135 @@
+{
+  "scales": [
+    {
+      "ranks": 1024,
+      "hosts": 64,
+      "within_partition_run_log_rmse": 0.011107378165268357,
+      "with_host_log_rmse": 0.01018114815966565,
+      "host_associated_sse_reduction": 0.15982375441927443,
+      "cross_seed_validation": [
+        {
+          "held_out_seed": -1,
+          "within_partition_run_sse_reduction": 0.16126350786075594
+        },
+        {
+          "held_out_seed": 17,
+          "within_partition_run_sse_reduction": 0.07511962764008528
+        },
+        {
+          "held_out_seed": 41,
+          "within_partition_run_sse_reduction": 0.1486390222510331
+        }
+      ]
+    },
+    {
+      "ranks": 2048,
+      "hosts": 128,
+      "within_partition_run_log_rmse": 0.004730297705478772,
+      "with_host_log_rmse": 0.004702721772443418,
+      "host_associated_sse_reduction": 0.011625295431805904,
+      "cross_seed_validation": [
+        {
+          "held_out_seed": -1,
+          "within_partition_run_sse_reduction": -0.01861692621087352
+        },
+        {
+          "held_out_seed": 17,
+          "within_partition_run_sse_reduction": -0.007859979350765212
+        },
+        {
+          "held_out_seed": 41,
+          "within_partition_run_sse_reduction": -0.020267464451410477
+        }
+      ]
+    },
+    {
+      "ranks": 4096,
+      "hosts": 256,
+      "within_partition_run_log_rmse": 0.09201169984311065,
+      "with_host_log_rmse": 0.023302372697951667,
+      "host_associated_sse_reduction": 0.9358621821205306,
+      "cross_seed_validation": [
+        {
+          "held_out_seed": -1,
+          "within_partition_run_sse_reduction": 0.9321163243226362
+        },
+        {
+          "held_out_seed": 17,
+          "within_partition_run_sse_reduction": 0.9294888935031194
+        },
+        {
+          "held_out_seed": 41,
+          "within_partition_run_sse_reduction": 0.9319516097190613
+        }
+      ]
+    },
+    {
+      "ranks": 8192,
+      "hosts": 512,
+      "within_partition_run_log_rmse": 0.195983329541947,
+      "with_host_log_rmse": 0.045294817391934604,
+      "host_associated_sse_reduction": 0.9465855497313923,
+      "cross_seed_validation": [
+        {
+          "held_out_seed": -1,
+          "within_partition_run_sse_reduction": 0.9433439519347694
+        },
+        {
+          "held_out_seed": 17,
+          "within_partition_run_sse_reduction": 0.9424610965427216
+        },
+        {
+          "held_out_seed": 41,
+          "within_partition_run_sse_reduction": 0.9439647551094803
+        }
+      ]
+    }
+  ],
+  "node_overlap": [
+    {
+      "scales": [
+        1024,
+        2048
+      ],
+      "shared_nodes": 0
+    },
+    {
+      "scales": [
+        1024,
+        4096
+      ],
+      "shared_nodes": 0
+    },
+    {
+      "scales": [
+        1024,
+        8192
+      ],
+      "shared_nodes": 0
+    },
+    {
+      "scales": [
+        2048,
+        4096
+      ],
+      "shared_nodes": 0
+    },
+    {
+      "scales": [
+        2048,
+        8192
+      ],
+      "shared_nodes": 0
+    },
+    {
+      "scales": [
+        4096,
+        8192
+      ],
+      "shared_nodes": 0
+    }
+  ],
+  "definition": "log(local_volume_mesh time) = logical-partition effect + seed/repeat run effect + host effect; observational association, not causal attribution",
+  "validation": "Host effects fitted on the other two seeds. Held-out residuals are centered by partition/run for diagnosis only, not a deployable predictor.",
+  "data_commit": "35ba2e5094eafef14b0ac25b5ed3abb31e55bef4"
+}
