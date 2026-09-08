@@ -1,0 +1,4 @@
+seed	parts	coarse_cells	variant	metis_header	idx_bits
+-1	4096	26411	cell_order_v1	5.2.1	32
+17	4096	26411	cell_order_v1	5.2.1	32
+41	4096	26411	cell_order_v1	5.2.1	32

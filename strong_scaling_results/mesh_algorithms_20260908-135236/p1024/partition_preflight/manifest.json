@@ -1,0 +1,47 @@
+{
+  "schema": "partition_sampling_v1",
+  "ready": true,
+  "ranks": 1024,
+  "seeds": [
+    -1,
+    17,
+    41
+  ],
+  "variant": "cell_order_v1",
+  "identity": {
+    "MESH_INPUT_SHA256": "8193db1235a9d0dc24d19dd3b9a4dafccfe62d6667ab5a395f72b30a02339547",
+    "MESH_BINARY_SHA256": "eabb6ef81e519d0f735e03743124c6562fd81b5b9b901dc1ab48ea964ab2c93a",
+    "numlevels": "3",
+    "numrefine": "3",
+    "maxh": "1000",
+    "minh": "0",
+    "omp_num_threads": "1"
+  },
+  "source_revision": "c6a2f1114603f811ac3cbb9ccf06d91c6c66e417",
+  "partitions": {
+    "-1": {
+      "signature": "dffda8b4bee71ff80a5c6427ed2a379b39c56fe9a1756ab33b7c18bb43d95ae3",
+      "labels_sha256": "edeac870af2af5481fab4ae668c2dbefa03744e8fa864df2bc459a1d27051a64",
+      "coarse_cells": 26411,
+      "metis_header": "5.2.1",
+      "idx_bits": 32
+    },
+    "17": {
+      "signature": "916fe4fade9d085c4e28b26f7aba173f1431cf9e3a3475bc58ea60b7280f8073",
+      "labels_sha256": "8f8d7566465390416243e1414597101defd15dd7b17be5d0eb25c3b5915ab262",
+      "coarse_cells": 26411,
+      "metis_header": "5.2.1",
+      "idx_bits": 32
+    },
+    "41": {
+      "signature": "11d2a70c44e76067c3c8d1ee35ff9546c1bf07ff7dbe00a81a4c1d0fe97eab69",
+      "labels_sha256": "cb28b3533625324c40e4073bc1f14614ec0c3d2ce9d831458c40d6bbd9e1c79a",
+      "coarse_cells": 26411,
+      "metis_header": "5.2.1",
+      "idx_bits": 32
+    }
+  },
+  "metis_library": {
+    "status": "未识别动态 METIS 库；可能为静态链接"
+  }
+}
