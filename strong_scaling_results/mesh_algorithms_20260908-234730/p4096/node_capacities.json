@@ -1,0 +1,19 @@
+{
+  "model_sha256": "7791d49be2427537a2df2878f8aba03d4a6966bb6043e9e80975c99a281c2de2",
+  "capacity_sha256": "6f299d45f69919015370c67be38f455252df4b3d54507ef2a8d2e7739ba930ab",
+  "identity": {
+    "MESH_INPUT_SHA256": "8193db1235a9d0dc24d19dd3b9a4dafccfe62d6667ab5a395f72b30a02339547",
+    "MESH_BINARY_SHA256": "b9583a23108eb270b681aa6ee5e77e572c89c661555708d6baca90bf15747904",
+    "numlevels": "3",
+    "numrefine": "3",
+    "maxh": "1000",
+    "minh": "0",
+    "omp_num_threads": "1"
+  },
+  "setup_wall_seconds": 73.0,
+  "reference_profile_sha256": "5f58e8d4a99ea145302f4e2a0a920c1480d2de582a106f1679230de2736b3bc6",
+  "slowdown_min": 0.8053646425392499,
+  "slowdown_max": 1.0634724502261852,
+  "slowdown_ratio": 1.3204856459468375,
+  "note": "本次分配的一次稀疏预热；准备成本单列，正式计时包含映射成本；非永久节点标定"
+}

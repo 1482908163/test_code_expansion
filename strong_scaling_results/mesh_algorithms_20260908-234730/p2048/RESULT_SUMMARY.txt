@@ -1,0 +1,31 @@
+实验结果总览 / Experiment result overview
+========================================================
+状态: 完整，可分析
+有效正式运行: 40 / 40
+异常项: 0
+
+优先查看：
+1. 本文件：快速判断实验是否完整及主要指标。
+2. analysis/summary.csv：论文分析用的重复实验中位数。
+3. analysis/issues.txt：仅在异常项不为 0 时查看。
+4. repeat_*/run.log.gz：只在排查某次失败时查看。
+
+核心汇总（时间单位 s，通信量单位 GiB）：
+algorithm timing ranks seed repeats core compute_max face_exchange vertex_wait imbalance recv_GiB vs_baseline vs_sparse
+balance natural 2048 41 5 15.981 10.626 1.490 - 1.309 9.264 0.999 0.942
+  节点映射：移动节点数=127.000；预测收益=0.684 s（非实测加速）
+  分区诊断：采用比例=1.000；跳过搜索次数=0；拒绝原因计数={"error_or_net_gain": 0, "feature_range": 0, "max_closure": 0, "no_moves": 0, "nominal_gain": 0, "total_closure": 0}
+balance split 2048 41 5 16.084 10.660 1.520 6.111 1.313 9.264 0.999 0.944
+  节点映射：移动节点数=127.000；预测收益=0.684 s（非实测加速）
+  分区诊断：采用比例=1.000；跳过搜索次数=0；拒绝原因计数={"error_or_net_gain": 0, "feature_range": 0, "max_closure": 0, "no_moves": 0, "nominal_gain": 0, "total_closure": 0}
+baseline natural 2048 41 5 15.963 10.703 1.519 - 1.319 9.264 1.000 0.943
+baseline split 2048 41 5 16.071 10.708 1.508 6.440 1.320 9.264 1.000 0.945
+combined natural 2048 41 5 15.174 10.554 0.245 - 1.305 0.026 1.052 0.992
+  节点映射：移动节点数=127.000；预测收益=0.684 s（非实测加速）
+  分区诊断：采用比例=1.000；跳过搜索次数=0；拒绝原因计数={"error_or_net_gain": 0, "feature_range": 0, "max_closure": 0, "no_moves": 0, "nominal_gain": 0, "total_closure": 0}
+combined split 2048 41 5 15.130 10.513 0.255 5.375 1.300 0.026 1.062 1.004
+  节点映射：移动节点数=127.000；预测收益=0.684 s（非实测加速）
+  分区诊断：采用比例=1.000；跳过搜索次数=0；拒绝原因计数={"error_or_net_gain": 0, "feature_range": 0, "max_closure": 0, "no_moves": 0, "nominal_gain": 0, "total_closure": 0}
+sparse natural 2048 41 5 15.049 10.584 0.247 - 1.309 0.026 1.061 1.000
+sparse split 2048 41 5 15.187 10.582 0.252 5.130 1.309 0.026 1.058 1.000
+节点能力准备 p2048: 73.000 s；最慢/最快因子=1.130；一次预热成本单列，不能视为免费。

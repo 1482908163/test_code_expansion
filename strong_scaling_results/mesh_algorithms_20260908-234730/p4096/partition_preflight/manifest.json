@@ -1,0 +1,39 @@
+{
+  "schema": "partition_sampling_v1",
+  "ready": true,
+  "ranks": 4096,
+  "seeds": [
+    41,
+    -1
+  ],
+  "variant": "cell_order_v1",
+  "identity": {
+    "MESH_INPUT_SHA256": "8193db1235a9d0dc24d19dd3b9a4dafccfe62d6667ab5a395f72b30a02339547",
+    "MESH_BINARY_SHA256": "b9583a23108eb270b681aa6ee5e77e572c89c661555708d6baca90bf15747904",
+    "numlevels": "3",
+    "numrefine": "3",
+    "maxh": "1000",
+    "minh": "0",
+    "omp_num_threads": "1"
+  },
+  "source_revision": "8f1a0a4ab6c96c01aea1d66e9f15b3933793b336",
+  "partitions": {
+    "41": {
+      "signature": "3b42074c138a93dd2423c2676b031c60450d736806241946fd31d615cb7682ab",
+      "labels_sha256": "0ee1f88869919275e9d07a272a6cbb9de7eea32eaf256318b90f3e19ada02691",
+      "coarse_cells": 26411,
+      "metis_header": "5.2.1",
+      "idx_bits": 32
+    },
+    "-1": {
+      "signature": "848797958be2e28b98ffac5be539f324e8b51958604a2c813a831aa6fed3a28b",
+      "labels_sha256": "47acbfee1c47e0687dc44e5366f66e07f80d7557bfc680c681a20b4d3dceb03d",
+      "coarse_cells": 26411,
+      "metis_header": "5.2.1",
+      "idx_bits": 32
+    }
+  },
+  "metis_library": {
+    "status": "未识别动态 METIS 库；可能为静态链接"
+  }
+}

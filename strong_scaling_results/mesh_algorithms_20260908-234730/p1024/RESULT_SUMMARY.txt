@@ -1,0 +1,27 @@
+实验结果总览 / Experiment result overview
+========================================================
+状态: 完整，可分析
+有效正式运行: 40 / 40
+异常项: 0
+
+优先查看：
+1. 本文件：快速判断实验是否完整及主要指标。
+2. analysis/summary.csv：论文分析用的重复实验中位数。
+3. analysis/issues.txt：仅在异常项不为 0 时查看。
+4. repeat_*/run.log.gz：只在排查某次失败时查看。
+
+核心汇总（时间单位 s，通信量单位 GiB）：
+algorithm timing ranks seed repeats core compute_max face_exchange vertex_wait imbalance recv_GiB vs_baseline vs_sparse
+balance natural 1024 41 5 19.634 13.593 0.712 - 1.272 4.630 0.995 0.984
+  分区诊断：采用比例=0.000；跳过搜索次数=0；拒绝原因计数={"error_or_net_gain": 0, "feature_range": 0, "max_closure": 0, "no_moves": 0, "nominal_gain": 0, "total_closure": 0}
+balance split 1024 41 5 19.581 13.605 0.696 6.624 1.272 4.630 1.000 0.992
+  分区诊断：采用比例=0.000；跳过搜索次数=0；拒绝原因计数={"error_or_net_gain": 0, "feature_range": 0, "max_closure": 0, "no_moves": 0, "nominal_gain": 0, "total_closure": 0}
+baseline natural 1024 41 5 19.527 13.553 0.707 - 1.268 4.630 1.000 0.989
+baseline split 1024 41 5 19.581 13.530 0.704 6.682 1.265 4.630 1.000 0.992
+combined natural 1024 41 5 19.404 13.637 0.226 - 1.281 0.020 1.006 0.995
+  分区诊断：采用比例=0.000；跳过搜索次数=0；拒绝原因计数={"error_or_net_gain": 0, "feature_range": 0, "max_closure": 0, "no_moves": 0, "nominal_gain": 0, "total_closure": 0}
+combined split 1024 41 5 19.354 13.603 0.227 6.685 1.278 0.020 1.012 1.004
+  分区诊断：采用比例=0.000；跳过搜索次数=0；拒绝原因计数={"error_or_net_gain": 0, "feature_range": 0, "max_closure": 0, "no_moves": 0, "nominal_gain": 0, "total_closure": 0}
+sparse natural 1024 41 5 19.311 13.633 0.231 - 1.281 0.020 1.011 1.000
+sparse split 1024 41 5 19.428 13.650 0.240 6.769 1.281 0.020 1.008 1.000
+节点能力准备 p1024: 58.000 s；最慢/最快因子=1.056；一次预热成本单列，不能视为免费。

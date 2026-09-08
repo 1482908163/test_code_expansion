@@ -1,0 +1,1 @@
+{"ranks": 2048, "repeats": 5, "algorithms": ["baseline", "balance", "sparse", "combined"], "timings": ["natural", "split"], "partition_seeds": [41]}
