@@ -23,7 +23,7 @@ PHASES = (COMPUTE[:2], (COMPUTE[2],), (COMPUTE[3],), COMPUTE[4:])
 SAMPLE_META = ("feature_schema", "EXPERIMENT_STAGE", "MESH_INPUT_SHA256", "MESH_BINARY_SHA256",
                "MESH_SOURCE_REVISION", "MESH_MODEL_SHA256", "numlevels", "numrefine", "maxh", "minh", "omp_num_threads", "partition_seed",
                "sampling_protocol", "partition_variant", "rank_shift", "RANKS_PER_NODE",
-               "MESH_PARTITION_SIGNATURE", "MESH_PREFLIGHT_SHA256")
+               "MESH_PARTITION_SIGNATURE", "MESH_PREFLIGHT_SHA256", "balance_method", "MESH_CAPACITY_SHA256")
 SAMPLE_FIELDS = list(SAMPLE_META)+["algorithm", "ranks", "rank", "repeat"]+[
     f"x{k}" for k in range(14)]+[f"y{k}" for k in range(4)]+[
     "face_complete_elapsed", "vertex_arrival_elapsed", "processor_name", "logical_partition", "volume_elements"]
@@ -182,6 +182,7 @@ def inspect(path, sample_sink=None):
     if metadata.get("feature_schema") in ("mesh_phase_v2", "mesh_phase_v3"):
         # Validate even during --finish-run, before SUCCESS is written.
         samples=[]
+        bundle_map={}; logical_seen=set()
         features=14 if metadata["feature_schema"]=="mesh_phase_v3" else 8
         for r in rows:
             sample={k:metadata.get(k, "unset") for k in SAMPLE_META}
@@ -191,7 +192,16 @@ def inspect(path, sample_sink=None):
             sample["volume_elements"]=r["metrics"].get("local_volume_elements_before_adjacency",0)
             if metadata.get("sampling_protocol")=="partition_sampling_v1":
                 shift=int(metadata["rank_shift"]);logical=sample["logical_partition"]
-                if not 0<=logical<n or not 0<=shift<n or (logical+shift)%n!=r["rank"]:
+                if metadata.get("balance_method")=="node_mapping":
+                    rpn=int(metadata["RANKS_PER_NODE"])
+                    if rpn<=0 or n%rpn or shift%rpn or not 0<=shift<n or not 0<=logical<n or logical in logical_seen:
+                        raise ValueError("invalid node bundle permutation")
+                    logical_seen.add(logical)
+                    bundle,target=logical//rpn,r["rank"]//rpn
+                    if logical%rpn!=r["rank"]%rpn or bundle_map.get(bundle,target)!=target:
+                        raise ValueError("node bundle was split")
+                    bundle_map[bundle]=target
+                elif not 0<=logical<n or not 0<=shift<n or (logical+shift)%n!=r["rank"]:
                     raise ValueError("logical partition/physical rank mapping mismatch")
             sample.update(algorithm=metadata["algorithm"], ranks=n, rank=r["rank"], repeat=r["repeat"])
             sample.update({f"x{k}":r["metrics"][f"phase_feature_{k}"] for k in range(features)})
@@ -209,6 +219,8 @@ def inspect(path, sample_sink=None):
             if any(r["stages"].get(s, {}).get("calls", 0)!=1 for s in COMPUTE):
                 raise ValueError("phase model requires one complete call of each compute stage")
             samples.append(sample)
+        if bundle_map and len(set(bundle_map.values()))!=len(bundle_map):
+            raise ValueError("node bundle mapping is not bijective")
         face_end=[r["metrics"]["face_complete_elapsed"] for r in rows]
         arrival=[r["metrics"]["vertex_arrival_elapsed"] for r in rows]
         result.update(compute_max_seconds=max(compute), compute_mean_seconds=mean(compute),
@@ -221,9 +233,10 @@ def inspect(path, sample_sink=None):
                     "closure_max_before", "closure_max_after", "candidate_closure_total", "candidate_closure_max",
                     "seed_max_seconds", "candidate_max_seconds", "partition_rejection_flags",
                     "seed_lower_seconds", "candidate_upper_seconds", "net_gain_lower_seconds",
-                    "correction_seconds", "search_timed_out", "search_skipped"):
+                    "correction_seconds", "search_timed_out", "search_skipped",
+                    "mapping_moved_nodes", "mapping_predicted_gain_seconds"):
             result[key]=next(r for r in rows if r["rank"]==0)["metrics"].get(key,0)
-        for s in ("metis_partition", "partition_cost_setup", "partition_cost_balance"):
+        for s in ("metis_partition", "partition_cost_setup", "partition_cost_balance", "partition_node_mapping"):
             result[s+"_seconds"]=max(seconds(r,s) for r in rows)
         for k in range(4):
             actual=[s[f"y{k}"] for s in samples]
@@ -277,7 +290,7 @@ def write_overview(root, runs, summaries, errors):
         "4. repeat_*/run.log.gz：只在排查某次失败时查看。",
         "",
         "核心汇总（时间单位 s，通信量单位 GiB）：",
-        "algorithm timing ranks seed repeats core face_exchange vertex_wait imbalance recv_GiB speedup",
+        "algorithm timing ranks seed repeats core compute_max face_exchange vertex_wait imbalance recv_GiB vs_baseline vs_sparse",
     ]
     for row in summaries:
         received = row.get("face_payload_receive_bytes_median")
@@ -285,16 +298,24 @@ def write_overview(root, runs, summaries, errors):
             str(row["algorithm"]), str(row["timing"]), str(row["ranks"]),
             str(row["partition_seed"]),
             str(row["successful_repeats"]), compact(row["core_median"]),
+            compact(row.get("compute_max_seconds_median")),
             compact(row.get("face_exchange_seconds_median")),
             compact(row.get("vertex_wait_seconds_median")),
             compact(row.get("compute_imbalance_median")),
             compact(received/(1024**3) if received is not None else None),
-            compact(row.get("speedup_vs_baseline")),
+            compact(row.get("speedup_vs_baseline")), compact(row.get("speedup_vs_sparse")),
         )))
         if row["algorithm"] in ("balance","combined"):
+            if row.get("mapping_moved_nodes_median",0):
+                lines.append("  节点映射：移动节点数="+compact(row["mapping_moved_nodes_median"])+
+                             "；预测收益="+compact(row.get("mapping_predicted_gain_seconds_median"))+" s（非实测加速）")
             lines.append("  分区诊断：采用比例="+compact(row.get("adoption_rate"))+
                          "；跳过搜索次数="+str(row.get("skipped_runs",0))+
                          "；拒绝原因计数="+str(row.get("rejection_counts","{}")))
+    for capacity in sorted(root.glob("**/node_capacities.json")):
+        report=json.loads(capacity.read_text())
+        lines.append(f"节点能力准备 {capacity.parent.name}: {report['setup_wall_seconds']:.3f} s；"
+                     f"最慢/最快因子={report['slowdown_ratio']:.3f}；一次预热成本单列，不能视为免费。")
     if errors:
         lines += ["", "存在异常：请先查看 analysis/issues.txt，不能直接使用本批结果。"]
     (root/"RESULT_SUMMARY.txt").write_text("\n".join(lines)+"\n")

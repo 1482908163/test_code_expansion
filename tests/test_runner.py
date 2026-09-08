@@ -354,7 +354,7 @@ out=pathlib.Path(value('--profile-dir'))
     assert sample['processor_name']=='cn_test' and sample['partition_seed']=='17' and sample['x13']=='14.0'
     assert float(next(csv.DictReader((new_run/'analysis/runs.csv').open()))['net_gain_lower_seconds'])==-3
     # The ordinary submission entry trains all models before any job is sent.
-    evaluation=dict(submit_base,EXPERIMENT_STAGE='evaluation',CALIBRATION_ROOT=str(v3_root),
+    evaluation=dict(submit_base,EXPERIMENT_STAGE='evaluation',BALANCE_METHOD='boundary',CALIBRATION_ROOT=str(v3_root),
                     PROCESS_COUNTS='8',LEVELS='3',REFINES='3',RUN_ROOT=str(tmp/'evaluation'))
     scheduled=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=evaluation,
                              capture_output=True,text=True)
@@ -392,11 +392,15 @@ metadata={k:os.environ[k] for k in ['MESH_INPUT_SHA256','MESH_BINARY_SHA256','ME
     'MESH_MODEL_SHA256','MESH_PARTITION_SIGNATURE','MESH_PREFLIGHT_SHA256','EXPERIMENT_STAGE','RANKS_PER_NODE']}
 metadata.update(feature_schema='mesh_phase_v3',sampling_protocol='partition_sampling_v1',
     partition_variant='cell_order_v1',rank_shift=str(shift),partition_seed=str(seed),
-    algorithm='sparse',timing_mode='natural',core_only='true',cost_model='geometric_proxy',
+    algorithm=value('--algorithm'),timing_mode='natural' if '--profile-natural' in args else 'split',
+    core_only='true',cost_model='geometric_proxy',
     numlevels=value('-l'),numrefine=value('-r'),maxh=value('--maxh'),minh=value('--minh'),omp_num_threads='1')
+metadata['balance_method']='node_mapping' if '--resource-model' in args else 'boundary'
+metadata['MESH_CAPACITY_SHA256']=os.environ.get('MESH_CAPACITY_SHA256','none')
 rows=[]
 for logical in range(p):
     rank=(logical+shift)%p
+    if '--rank-capacities' in args and value('--algorithm') in ('balance','combined'):rank=p-1-rank
     metrics=dict(core_seconds=1,local_volume_elements_before_adjacency=100+logical,
         logical_partition=logical,face_complete_elapsed=.1,vertex_arrival_elapsed=.8)
     metrics.update({f'phase_feature_{k}':1 if k==0 else (logical+1)*(k+1)+(seed+1)/100 for k in range(14)})
@@ -405,7 +409,7 @@ for logical in range(p):
     rows.append(dict(rank=rank,ranks=p,repeat=repeat,metadata=metadata,metrics=metrics,
                      stages=stages,processor_name=f'node{rank}'))
 (pathlib.Path(value('--profile-dir'))/'rank_profiles.jsonl').write_text(''.join(json.dumps(r)+'\\n' for r in rows))
-# --algorithm research_1 global_id_bits
+# --algorithm research_1 global_id_bits mesh_resource_v1 --rank-capacities
 ''')
     modern.chmod(0o755)
     calibration=dict(env,EXPERIMENT_STAGE='calibration',PROCESS_COUNT='3',RANKS_PER_NODE='1',
@@ -431,4 +435,35 @@ for logical in range(p):
     assert stopped.returncode==2,(stopped.stdout,stopped.stderr)
     assert (tmp/'duplicate_audit').read_text()=='preflight\n'
     assert '未启动细网格采样' in (tmp/'duplicate_results/p3/RESULT_SUMMARY.txt').read_text()
+    # 第四次完整入口：复用刚产生的训练样本，能力预热只一次，四组共用并可续跑。
+    import resource_model as resource
+    resource_root=tmp/'resource_evaluation'
+    resource.train(tmp/'modern_results',resource_root/'models',3,3,3,1)
+    resource_env=dict(calibration,EXPERIMENT_STAGE='evaluation',BALANCE_METHOD='node_mapping',
+        PARTITION_SEEDS='41',ALGORITHMS='baseline balance sparse combined',TIMING_MODES='natural split',
+        REPEATS='1',RUN_ROOT=str(resource_root),MOCK_AUDIT=str(tmp/'resource_audit'))
+    mapped=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=resource_env,
+                          capture_output=True,text=True)
+    assert mapped.returncode==0,(mapped.stdout,mapped.stderr)
+    node_report=json.loads((resource_root/'p3/node_capacities.json').read_text())
+    assert node_report['slowdown_ratio']>0
+    resource_audit=(tmp/'resource_audit').read_text().splitlines()
+    assert len(resource_audit)==18 and resource_audit[1]=='fine -1 0 0'
+    with (resource_root/'p3/analysis/runs.csv').open() as stream: mapped_runs=list(csv.DictReader(stream))
+    assert len(mapped_runs)==8 and {r['algorithm'] for r in mapped_runs}=={'baseline','balance','sparse','combined'}
+    assert (resource_root/'p3/capacity_warmup/rank_profiles.jsonl.gz').exists()
+    resumed=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=resource_env,
+                           capture_output=True,text=True)
+    assert resumed.returncode==0,(resumed.stdout,resumed.stderr)
+    assert (tmp/'resource_audit').read_text().splitlines()==resource_audit
+    # 留出分区的特征/时间不能影响模型训练。
+    model_a=(resource_root/'models/p3.mapping').read_bytes()
+    samples_path=modern_p/'analysis/model_samples.csv.gz'
+    with gzip.open(samples_path,'rt') as stream: source_rows=list(csv.DictReader(stream))
+    for row in source_rows:
+        if row['partition_seed']=='41':row['x1']='not a number';row['y1']='not a number'
+    with gzip.open(samples_path,'wt',newline='') as stream:
+        writer=csv.DictWriter(stream,fieldnames=list(source_rows[0]));writer.writeheader();writer.writerows(source_rows)
+    resource.train(tmp/'modern_results',tmp/'holdout_poison',3,3,3,1)
+    assert (tmp/'holdout_poison/p3.mapping').read_bytes()==model_a
 print('PASS: Slurm spool path, failure continuation, warmup filtering, compressed resume, lossless analysis, cleanup opt-out, failure/active/symlink protection, configuration guard')

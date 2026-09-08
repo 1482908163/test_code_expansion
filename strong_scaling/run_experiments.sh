@@ -15,12 +15,14 @@ export STRONG_SCALING_DIR="${SCRIPT_DIR}"
 # 环境变量仍可覆盖这些默认值，主要供作业脚本内部传递及断点续跑使用。
 # ============================================================================
 EXPERIMENT_PRESET="${EXPERIMENT_PRESET:-production}"
-# 第三次迭代仍只改本配置区、直接 bash strong_scaling/run_experiments.sh。
-# calibration: 先验证真实分区差异，再采样；正式重复轮换分区到节点的映射。
-# evaluation : 从 CALIBRATION_ROOT 自动冻结排除目标规模的模型，运行四组对照。
-# legacy     : 运行第一轮的几何代理模型，用于方法复查。
-EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-calibration}"
-CALIBRATION_ROOT="${CALIBRATION_ROOT:-}"
+# 第四次迭代：production 默认直接评价；pilot 保留小规模采样入口。
+# node_mapping: 固定分区的节点组映射；boundary: 保留历史边界移动方法。
+# 已有第三次校准用于同规模训练 -1/17，正式评价使用留出的 41。
+default_stage=evaluation
+[[ "${EXPERIMENT_PRESET}" == pilot ]] && default_stage=calibration
+EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-${default_stage}}"
+BALANCE_METHOD="${BALANCE_METHOD:-node_mapping}"
+CALIBRATION_ROOT="${CALIBRATION_ROOT:-${SCRIPT_DIR}/../strong_scaling_results/mesh_algorithms_20260908-135236}"
 MIN_GAIN_SECONDS="${MIN_GAIN_SECONDS:-0.35}"
 MIN_GAIN_FRACTION="${MIN_GAIN_FRACTION:-0.05}"
 CLOSURE_GROWTH="${CLOSURE_GROWTH:-0}"
@@ -36,6 +38,7 @@ case "${EXPERIMENT_STAGE}" in
         default_algorithms="baseline balance sparse combined"
         default_timings="natural split"
         default_seeds="-1"
+        [[ "${EXPERIMENT_STAGE}" == evaluation && "${BALANCE_METHOD}" == node_mapping ]] && default_seeds="41"
         default_repeats=5
         ;;
     *) echo "EXPERIMENT_STAGE must be calibration, evaluation or legacy" >&2; exit 2 ;;
@@ -94,7 +97,7 @@ export BALANCE_SWEEPS CUT_GROWTH COST_WEIGHTS TIMEOUT_SECONDS START_DELAY_SECOND
 export PARTITION SBATCH_COMMAND SBATCH_EXTRA_ARGS MPI_LAUNCHER MPI_EXTRA_ARGS DRY_RUN INPUT_PATH
 export EXPERIMENT_STAGE CALIBRATION_ROOT MIN_GAIN_SECONDS MIN_GAIN_FRACTION CLOSURE_GROWTH
 export PARTITION_SEEDS SEARCH_SECONDS
-export PARTITION_VARIANT PLACEMENT_ROTATION
+export PARTITION_VARIANT PLACEMENT_ROTATION BALANCE_METHOD
 
 # 登录节点：转入提交驱动；计算作业：继续执行下方 worker（工作进程）逻辑。
 if [[ "${MESH_EXPERIMENT_WORKER:-0}" != 1 ]]; then
@@ -136,6 +139,14 @@ if [[ "${EXPERIMENT_STAGE}" == calibration ]]; then
         echo "第三次校准需要至少3组分区、3次正式重复及节点轮换；修改统一配置区。" >&2; exit 2;
     }
 fi
+resource_evaluation=0
+if [[ "${EXPERIMENT_STAGE}" == evaluation && "${BALANCE_METHOD}" == node_mapping ]]; then
+    resource_evaluation=1
+    [[ "${PARTITION_SEEDS}" == 41 && "${PARTITION_VARIANT}" == cell_order_v1 ]] || {
+        echo "节点映射本轮固定使用留出分区 41；-1/17 已用于训练。" >&2;exit 2;
+    }
+fi
+[[ "${BALANCE_METHOD}" == node_mapping || "${BALANCE_METHOD}" == boundary ]] || exit 2
 read -r -a mpi_extra <<< "${MPI_EXTRA_ARGS}"
 for a in "${algorithms[@]}"; do
     case "$a" in baseline|balance|sparse|combined) ;; *) echo "Unknown algorithm: $a" >&2; exit 2;; esac
@@ -155,6 +166,7 @@ done
 binary_error=""
 markers=("--profile-core-only" "--algorithm" "research_1" "global_id_bits" "mesh_phase_v3")
 [[ "${EXPERIMENT_STAGE}" == legacy ]] || markers+=("partition_sampling_v1" "--preflight-parts")
+((resource_evaluation==0)) || markers+=("mesh_resource_v1" "--rank-capacities")
 for marker in "${markers[@]}"; do
     if ! LC_ALL=C grep -aFq -- "${marker}" "${BINARY}"; then
         binary_error="missing capability marker ${marker}"
@@ -180,7 +192,17 @@ MESH_SOURCE_REVISION="${MESH_SOURCE_REVISION:-$(git -C "${REPOSITORY_ROOT}" rev-
 export MESH_SOURCE_REVISION
 export MESH_MODEL_SHA256="none"
 model_args=()
-if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
+export MESH_CAPACITY_SHA256="none"
+resource_check=()
+if ((resource_evaluation)); then
+    model="${RUN_ROOT}/models/p${PROCESS_COUNT}.mapping"
+    resource_check=(--model "${model}" --target-ranks "${PROCESS_COUNT}" --levels "${LEVELS}"
+                    --refines "${REFINES}" --rpn "${RANKS_PER_NODE}")
+    python3 "${SCRIPT_DIR}/resource_model.py" "${resource_check[@]}"
+    export MESH_MODEL_SHA256="$(sha256sum "${model}" | cut -d ' ' -f1)"
+    model_args=(--resource-model "${model}" --min-gain-seconds "${MIN_GAIN_SECONDS}"
+                --min-gain-fraction "${MIN_GAIN_FRACTION}")
+elif [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
     model="${RUN_ROOT}/models/p${PROCESS_COUNT}.model"
     python3 "${SCRIPT_DIR}/fit_cost_model.py" --verify "${model}" --levels "${LEVELS}" --refines "${REFINES}" \
         --target-ranks "${PROCESS_COUNT}" --input-sha "${MESH_INPUT_SHA256}" --binary-sha "${MESH_BINARY_SHA256}" \
@@ -221,6 +243,8 @@ printf '%s\n' "${config_text}" > "${pdir}/configuration.txt"
 # 每个并行作业先用一个进程检查其正式分区规模，不生成细网格。
 # 只保留三份粗单元归属与一个摘要；失败立即停止本规模的昂贵采样。
 preflight="${pdir}/partition_preflight"
+preflight_seeds=("${seeds[@]}")
+((resource_evaluation==0)) || preflight_seeds+=(-1)
 preflight_failed() {
     printf '分区预检未通过，未启动细网格采样。请查看 partition_preflight/run.log。\n' > "${pdir}/RESULT_SUMMARY.txt"
     cat "${pdir}/RESULT_SUMMARY.txt" >&2
@@ -231,7 +255,7 @@ if [[ "${EXPERIMENT_STAGE}" != legacy ]]; then
     preflight_check=(--levels "${LEVELS}" --refines "${REFINES}" --target-ranks "${PROCESS_COUNT}"
         --input-sha "${MESH_INPUT_SHA256}" --binary-sha "${MESH_BINARY_SHA256}"
         --maxh "${MAXH}" --minh "${MINH}" --threads "${OMP_NUM_THREADS}"
-        --seeds "${seeds[@]}" --variant "${PARTITION_VARIANT}")
+        --seeds "${preflight_seeds[@]}" --variant "${PARTITION_VARIANT}")
     if [[ -f "${preflight}/manifest.json" ]]; then
         python3 "${SCRIPT_DIR}/fit_cost_model.py" --verify-preflight "${preflight}" "${preflight_check[@]}" \
             >> "${preflight}/run.log" 2>&1 || preflight_failed
@@ -241,7 +265,7 @@ if [[ "${EXPERIMENT_STAGE}" != legacy ]]; then
         if ! timeout "${TIMEOUT_SECONDS}" "${probe[@]}" "${BINARY}" \
             -i "${INPUT_PATH}" -l "${LEVELS}" -r "${REFINES}" --maxh "${MAXH}" --minh "${MINH}" \
             --algorithm sparse --partition-variant "${PARTITION_VARIANT}" --profile-core-only \
-            --preflight-parts "${PROCESS_COUNT}" --preflight-seeds "${PARTITION_SEEDS}" \
+            --preflight-parts "${PROCESS_COUNT}" --preflight-seeds "${preflight_seeds[*]}" \
             --preflight-dir "${preflight}" -o "${preflight}/mesh/" > "${preflight}/run.log" 2>&1; then
             preflight_failed
         fi
@@ -249,6 +273,41 @@ if [[ "${EXPERIMENT_STAGE}" != legacy ]]; then
             "${preflight_check[@]}" --binary "${BINARY}" >> "${preflight}/run.log" 2>&1 || preflight_failed
     fi
     export MESH_PREFLIGHT_SHA256="$(sha256sum "${preflight}/manifest.json" | cut -d ' ' -f1)"
+fi
+# 一次当前节点参考预热，冻结能力后运行全部四组；不新增校准作业。
+if ((resource_evaluation)); then
+    capacity="${pdir}/node_capacities.txt"
+    python3 "${SCRIPT_DIR}/resource_model.py" "${resource_check[@]}" --preflight "${preflight}"
+    if [[ ! -f "${capacity}" ]]; then
+        if [[ -n "$(find "${pdir}" -path '*/repeat_*/SUCCESS' -print -quit)" ]]; then
+            echo "已有正式结果但节点能力文件缺失，不能重估后混用；请使用新结果目录。" >&2;exit 2
+        fi
+        warm="${pdir}/capacity_warmup"
+        mkdir -p "${warm}"
+        export MESH_PARTITION_SIGNATURE="$(python3 - "${preflight}/manifest.json" <<'REFERENCE'
+import json,sys
+print(json.load(open(sys.argv[1]))['partitions']['-1']['signature'])
+REFERENCE
+        )"
+        started=$(date +%s)
+        if ! timeout "${TIMEOUT_SECONDS}" "${launch[@]}" "${BINARY}" "${common[@]}" \
+            --algorithm sparse --partition-seed -1 --rank-shift 0 \
+            --partition-reference "${preflight}/seed_-1.labels" --profile-core-only --profile-natural \
+            --profile-dir "${warm}" --profile-experiment capacity_warmup --profile-repeat 0 \
+            -o "${warm}/mesh/" > "${warm}/run.log" 2>&1; then
+            echo "节点能力预热失败；查看 capacity_warmup/run.log。" > "${pdir}/RESULT_SUMMARY.txt"
+            exit 2
+        fi
+        python3 "${SCRIPT_DIR}/analyze_results.py" "${warm}" --finish-run "${cleanup_args[@]}"
+        profile="${warm}/rank_profiles.jsonl.gz"
+        [[ -f "${profile}" ]] || profile="${warm}/rank_profiles.jsonl"
+        python3 "${SCRIPT_DIR}/resource_model.py" "${resource_check[@]}" --preflight "${preflight}" \
+            --profile "${profile}" --output "${capacity}" --elapsed "$(( $(date +%s)-started ))"
+    fi
+    python3 "${SCRIPT_DIR}/resource_model.py" "${resource_check[@]}" --preflight "${preflight}" \
+        --verify-capacity "${capacity}"
+    export MESH_CAPACITY_SHA256="$(sha256sum "${capacity}" | cut -d ' ' -f1)"
+    common+=(--rank-capacities "${capacity}")
 fi
 # Correctness checks deliberately cannot be combined with timing collection.
 if [[ "${VERIFY_FACES}" == 1 ]]; then

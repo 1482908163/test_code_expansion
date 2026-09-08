@@ -93,7 +93,7 @@ def digest(path):
             h.update(block)
     return h.hexdigest()
 
-def fit(rows, columns=None, tail_weighted=False):
+def fit(rows, columns=None, tail_weighted=False, max_iterations=20000):
     """Nonnegative ridge least squares on RMS-scaled features (lambda=1e-4).
 
     Each process-count group has equal total weight; an 8192-rank sample must
@@ -119,7 +119,7 @@ def fit(rows, columns=None, tail_weighted=False):
     for phase in range(4):
         rhs=[sum(w*a[j]*r["y"][phase] for a,r,w in zip(x,rows,weight)) for j in range(n)]
         beta=[0.0]*n
-        for _ in range(20000):
+        for _ in range(max_iterations):
             delta=0.0
             for j in range(n):
                 value=max(0.0,(rhs[j]-sum(gram[j][k]*beta[k] for k in range(n) if k!=j))/gram[j][j])

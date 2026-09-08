@@ -2,11 +2,14 @@
 #include <string>
 #include "partition_cost.h"
 #include "partition_sampling.h"
+#include "resource_mapping.h"
 namespace mesh_research {
 struct ResearchOptions {
     std::string algorithm = "baseline";
     std::string model_path;
     CostConfig cost;
+    std::string resource_path, capacity_path;
+    ResourceModel resource;
     int partition_seed = -1; // -1 retains the library's original default.
     std::string partition_variant = "metis_seed";
     std::string reference_path, preflight_dir;

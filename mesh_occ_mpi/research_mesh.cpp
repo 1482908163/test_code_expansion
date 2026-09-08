@@ -132,7 +132,7 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
     if(!labels || ne<parts || ne<=0) protocol_error(MPI_COMM_WORLD,"more partitions than coarse cells");
     std::vector<double> all_stats;
     auto &profile=scaling::Profiler::instance();
-    constexpr int stat_count=9+phase_features+phase_count;
+    constexpr int stat_count=10+phase_features+phase_count;
     if(rank==0) {
         try {
             std::vector<int> part(ne,0);
@@ -152,23 +152,49 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
             BalanceResult result;
             {
                 scaling::StageScope time("partition_cost_balance","compute");
-                result=balance_partition(graph,part,parts,options().cost,options().balance());
+                result=balance_partition(graph,part,parts,options().cost,options().balance() && options().resource_path.empty());
+            }
+            std::vector<int> placement(parts);
+            for(int p=0;p<parts;++p)placement[p]=physical_partition_rank(p,parts,options().rank_shift);
+            if(!options().resource_path.empty()) {
+                scaling::StageScope time("partition_node_mapping","compute");
+                std::vector<double> work(parts);
+                for(int p=0;p<parts;++p) {
+                    const auto y=options().resource.predict(phase_cost_features(result.after[p],options().cost));
+                    work[p]=std::accumulate(y.begin(),y.end(),0.0);
+                }
+                const auto m=map_node_bundles(work,options().resource.slowdown,options().resource.rpn,
+                    options().rank_shift,options().cost.min_gain_seconds,options().cost.min_gain_fraction,
+                    options().balance() && !options().capacity_path.empty());
+                placement=m.placement;result.adopted=m.adopted;
+                result.seed_max_seconds=m.before;result.candidate_max_seconds=m.candidate;
+                result.correction_seconds=m.seconds;
+                profile.set_metric("mapping_moved_nodes",m.moved_nodes);
+                profile.set_metric("mapping_predicted_gain_seconds",m.before-m.candidate-m.seconds);
             }
             all_stats.resize(static_cast<std::size_t>(parts)*stat_count);
             for(int p=0;p<parts;++p) {
                 const auto after=cost_features(result.after[p],options().cost);
-                const int physical=physical_partition_rank(p,parts,options().rank_shift);
+                const int physical=placement[p];
                 double *s=all_stats.data()+physical*stat_count;
                 s[0]=predicted_cost(result.before[p],options().cost);
                 s[1]=predicted_cost(result.after[p],options().cost);
                 s[2]=result.after[p].cells;s[3]=result.after[p].faces;s[4]=result.after[p].volume;
                 for(int k=0;k<4;++k)s[5+k]=after[k];
                 const auto x=phase_cost_features(result.after[p],options().cost);
-                const auto y=predicted_phases(result.after[p],options().cost);
+                auto y=predicted_phases(result.after[p],options().cost);
+                if(!options().resource_path.empty()) {
+                    y=options().resource.predict(x);
+                    const double intrinsic=std::accumulate(y.begin(),y.end(),0.0);
+                    s[0]=intrinsic*options().resource.slowdown[((p+options().rank_shift)%parts)/options().resource.rpn];
+                    for(auto &v:y)v*=options().resource.slowdown[physical/options().resource.rpn];
+                    s[1]=std::accumulate(y.begin(),y.end(),0.0);
+                }
+                s[stat_count-1]=p;
                 for(int k=0;k<phase_features;++k)s[9+k]=x[k];
                 for(int k=0;k<phase_count;++k)s[9+phase_features+k]=y[k];
             }
-            for(int i=0;i<ne;++i)labels[i]=physical_partition_rank(part[i],parts,options().rank_shift);
+            for(int i=0;i<ne;++i)labels[i]=placement[part[i]];
             profile.set_metric("partition_cut_before",result.cut_before);
             profile.set_metric("partition_cut_after",result.cut_after);
             profile.set_metric("partition_moves",result.accepted_moves);
@@ -213,7 +239,7 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
     for(int k=0;k<9;++k)profile.set_metric(names[k],local_stats[k]);
     for(int k=0;k<phase_features;++k)profile.set_metric("phase_feature_"+std::to_string(k),local_stats[9+k]);
     for(int k=0;k<phase_count;++k)profile.set_metric("phase_prediction_"+std::to_string(k),local_stats[9+phase_features+k]);
-    profile.set_metric("logical_partition",(static_cast<long long>(rank)-options().rank_shift+parts)%parts);
+    profile.set_metric("logical_partition",local_stats[stat_count-1]);
     return labels;
 }
 void SparseGatherFaceMap(std::map<int,xdMeshFaceInfo> &facemap,

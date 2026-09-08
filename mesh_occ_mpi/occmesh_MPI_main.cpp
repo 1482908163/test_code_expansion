@@ -41,6 +41,7 @@ void print_help() {
          "--cut-growth <比例> : 允许新增切分面比例，默认0.05" << endl <<
          "--cost-weights <a,b,c,d> : 四阶段代价权重，默认1,1,1,1" << endl <<
          "--phase-model <文件> : 冻结的分阶段耗时模型，由统一脚本提供" << endl <<
+         "--resource-model / --rank-capacities : 几何与当前节点能力模型，由统一入口提供" << endl <<
          "--min-gain-seconds / --min-gain-fraction : 预计最大耗时下降门槛" << endl <<
          "--closure-growth <比例> : 最终依赖闭包增长预算，默认0" << endl <<
          "--partition-seed <整数> : METIS 分区种子，-1保留库默认" << endl <<
@@ -172,6 +173,7 @@ int main(int argc, char **argv) {
         }
         else if(!strcmp(argv[i],"--algorithm") || !strcmp(argv[i],"--balance-sweeps") ||
                 !strcmp(argv[i],"--cut-growth") || !strcmp(argv[i],"--cost-weights") ||
+                !strcmp(argv[i],"--resource-model") || !strcmp(argv[i],"--rank-capacities") ||
                 !strcmp(argv[i],"--phase-model") || !strcmp(argv[i],"--min-gain-seconds") ||
                 !strcmp(argv[i],"--min-gain-fraction") || !strcmp(argv[i],"--closure-growth") ||
                 !strcmp(argv[i],"--partition-seed") || !strcmp(argv[i],"--search-seconds") ||
@@ -186,6 +188,8 @@ int main(int argc, char **argv) {
                 std::size_t consumed=0;
                 if(option=="--algorithm") research.algorithm=value;
                 else if(option=="--phase-model") research.model_path=value;
+                else if(option=="--resource-model") research.resource_path=value;
+                else if(option=="--rank-capacities") research.capacity_path=value;
                 else if(option=="--partition-variant") research.partition_variant=value;
                 else if(option=="--partition-reference") research.reference_path=value;
                 else if(option=="--preflight-dir") research.preflight_dir=value;
@@ -284,6 +288,25 @@ int main(int argc, char **argv) {
         }
         catch(const std::exception &e) {std::cerr<<e.what()<<std::endl;MPI_Abort(MPI_COMM_WORLD,2);}
     }
+    if(!research.resource_path.empty()) {
+        std::vector<char> hosts;
+        if(id==0)hosts.resize(static_cast<std::size_t>(p)*MPI_MAX_PROCESSOR_NAME);
+        char host[MPI_MAX_PROCESSOR_NAME]={};int length=0;
+        MPI_Get_processor_name(host,&length);
+        MPI_Gather(host,MPI_MAX_PROCESSOR_NAME,MPI_CHAR,hosts.data(),MPI_MAX_PROCESSOR_NAME,MPI_CHAR,0,MPI_COMM_WORLD);
+        if(id==0)try {
+            research.resource.read(research.resource_path);
+            if(!research.model_path.empty() || research.resource.ranks!=p ||
+               research.resource.levels!=numlevels || research.resource.refines!=numrefine ||
+               research.rank_shift%research.resource.rpn)
+                throw std::runtime_error("resource model configuration mismatch");
+            if(!research.capacity_path.empty()) {
+                std::vector<std::string> names;
+                for(int i=0;i<p;++i)names.emplace_back(hosts.data()+static_cast<std::size_t>(i)*MPI_MAX_PROCESSOR_NAME);
+                research.resource.read_capacities(research.capacity_path,names);
+            } else if(research.balance())throw std::runtime_error("node mapping requires current allocation capacities");
+        } catch(const std::exception &e) {std::cerr<<e.what()<<std::endl;MPI_Abort(MPI_COMM_WORLD,2);}
+    } else if(!research.capacity_path.empty())MPI_Abort(MPI_COMM_WORLD,2);
     if ((research.algorithm!="baseline" && research.algorithm!="balance" &&
          research.algorithm!="sparse" && research.algorithm!="combined") ||
         (research.verify_faces && (!research.sparse() || profile_enabled)) ||
@@ -339,9 +362,11 @@ int main(int argc, char **argv) {
     profiler.add_metadata("timing_boundary","post_coarse_barrier_to_adjacency_complete");
     profiler.add_metadata("core_only",profile_core_only?"true":"false");
     profiler.add_metadata("partition_contract","one partition per MPI rank");
-    profiler.add_metadata("cost_model",research.model_path.empty()?"geometric_proxy":"phase_seconds");
+    profiler.add_metadata("cost_model",!research.resource_path.empty()?"phase_seconds_resource":
+        (research.model_path.empty()?"geometric_proxy":"phase_seconds"));
+    profiler.add_metadata("balance_method",research.resource_path.empty()?"boundary":"node_mapping");
     for(const char *key:{"MESH_INPUT_SHA256","MESH_BINARY_SHA256","MESH_SOURCE_REVISION","MESH_MODEL_SHA256","EXPERIMENT_STAGE",
-                        "MESH_PARTITION_SIGNATURE","MESH_PREFLIGHT_SHA256","RANKS_PER_NODE"}) {
+                        "MESH_PARTITION_SIGNATURE","MESH_PREFLIGHT_SHA256","RANKS_PER_NODE","MESH_CAPACITY_SHA256"}) {
         const char *v=std::getenv(key);profiler.add_metadata(key,v?v:"unset");
     }
     profiler.add_metadata("cut_growth",std::to_string(research.cost.cut_growth));

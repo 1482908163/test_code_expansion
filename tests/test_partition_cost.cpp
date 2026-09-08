@@ -1,5 +1,6 @@
 #include "partition_cost.h"
 #include "partition_sampling.h"
+#include "resource_mapping.h"
 #include <cassert>
 #include <iostream>
 #include <random>
@@ -10,6 +11,48 @@ static double max_work(const std::vector<PartCost> &s,const CostConfig &cfg) {
 }
 static void close(double a,double b) {assert(std::abs(a-b)<1e-8*std::max(1.0,std::abs(a)));}
 int main() {
+    // 节点组瓶颈配对：与全部节点排列穷举对照，覆盖带轮换的基线。
+    for(int trial=0;trial<40;++trial) {
+        std::vector<double> work={1.+trial%5,3.,8.,2.,4.,7.,6.,5.};
+        std::vector<double> speed={1.,1.7,0.6,1.3};
+        const auto m=map_node_bundles(work,speed,2,2,0,0,true);
+        std::vector<int> perm={0,1,2,3};double optimum=1e100;
+        do {
+            double maximum=0;
+            for(int i=0;i<8;++i)maximum=std::max(maximum,work[i]*speed[perm[i/2]]);
+            optimum=std::min(optimum,maximum);
+        } while(std::next_permutation(perm.begin(),perm.end()));
+        close(m.candidate,optimum);
+        std::set<int> ranks(m.placement.begin(),m.placement.end());assert(ranks.size()==8);
+        for(int i=0;i<8;++i)for(int j=0;j<8;++j)
+            assert((i/2==j/2)==(m.placement[i]/2==m.placement[j]/2));
+        for(int i=0;i<8;++i)assert(i%2==m.placement[i]%2);
+    }
+    auto homogeneous=map_node_bundles({2,1,9,3},{1,1},2,2,0,0,true);
+    assert(!homogeneous.adopted && homogeneous.placement==std::vector<int>({2,3,0,1}));
+    auto expensive=map_node_bundles({2,1,9,3},{1,2},2,0,100,0,true);
+    assert(!expensive.adopted);
+    bool invalid_mapping=false;
+    try {map_node_bundles({1,2,3,4},{1,2},2,1,0,0,true);}
+    catch(const std::runtime_error &) {invalid_mapping=true;}
+    assert(invalid_mapping);
+    std::ostringstream resource_text;
+    resource_text<<"mesh_resource_v1 4 3 3 2 14\n";
+    for(int k=0;k<4;++k)for(int j=0;j<14;++j)resource_text<<(j==0?1:0)<<' ';
+    ResourceModel resource;std::istringstream resource_in(resource_text.str());resource.read(resource_in);
+    std::array<double,14> features{};features[0]=1;close(resource.predict(features)[0],1);
+    const std::string capacity_text="mesh_capacity_v1 4 2\nnodeA 1.2\nnodeA 1.2\nnodeB 0.8\nnodeB 0.8\n";
+    std::istringstream capacity_in(capacity_text);
+    resource.read_capacities(capacity_in,{"nodeA","nodeA","nodeB","nodeB"});
+    close(resource.slowdown[0],1.2);close(resource.slowdown[1],0.8);
+    try {
+        std::istringstream stale(capacity_text);
+        resource.read_capacities(stale,{"nodeC","nodeC","nodeB","nodeB"});assert(false);
+    } catch(const std::runtime_error &) {}
+    try {
+        std::istringstream broken("mesh_capacity_v1 4 2 nodeA 1 nodeA 2 nodeB 1 nodeB 1");
+        resource.read_capacities(broken,{"nodeA","nodeA","nodeB","nodeB"});assert(false);
+    } catch(const std::runtime_error &) {}
     // 第三次迭代：重排可复现、归属签名忽略标签置换、轮换为双射。
     const auto identity=sampling_cell_order(26411,-1,true);
     assert(identity==sampling_cell_order(26411,17,false));

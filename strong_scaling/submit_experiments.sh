@@ -28,8 +28,16 @@ if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
         echo "Set CALIBRATION_ROOT in run_experiments.sh to the completed v3 multi-seed calibration directory." >&2
         exit 2
     }
-    python3 "${SCRIPT_DIR}/fit_cost_model.py" --calibration-root "${CALIBRATION_ROOT}" \
-        --target-ranks "${counts[@]}" --levels "${LEVELS}" --refines "${REFINES}" --output "${RUN_ROOT}/models" --require-v3 --require-sampling
+    if [[ "${BALANCE_METHOD}" == node_mapping ]]; then
+        [[ "${PARTITION_SEEDS}" == 41 && "${PARTITION_VARIANT}" == cell_order_v1 ]] || {
+            echo "本轮映射评价使用留出分区 41。" >&2;exit 2;
+        }
+        python3 "${SCRIPT_DIR}/resource_model.py" --train "${CALIBRATION_ROOT}" --output "${RUN_ROOT}/models" \
+            --target-ranks "${counts[@]}" --levels "${LEVELS}" --refines "${REFINES}" --rpn "${RANKS_PER_NODE}"
+    else
+        python3 "${SCRIPT_DIR}/fit_cost_model.py" --calibration-root "${CALIBRATION_ROOT}" \
+            --target-ranks "${counts[@]}" --levels "${LEVELS}" --refines "${REFINES}" --output "${RUN_ROOT}/models" --require-v3 --require-sampling
+    fi
 fi
 printf '%s\n' "${counts[@]}" > "${RUN_ROOT}/requested_process_counts.txt"
 failures=0
