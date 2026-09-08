@@ -8,10 +8,12 @@ import os
 import runpy
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'strong_scaling'))
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     launcher = tmp/'launcher'
@@ -56,7 +58,7 @@ out=pathlib.Path(value('--profile-dir'))
         ALGORITHMS='baseline sparse', TIMING_MODES='natural', REPEATS='1', WARMUPS='1',
         MPI_LAUNCHER=str(launcher), MPI_EXTRA_ARGS=' ', START_EPOCH='0', VERIFY_FACES='0',
         RANKS_PER_NODE='1', TIMEOUT_SECONDS='10', CLEANUP_RESULTS='1',
-        MESH_EXPERIMENT_WORKER='1',PARTITION_SEEDS='-1')
+        MESH_EXPERIMENT_WORKER='1',PARTITION_SEEDS='-1',EXPERIMENT_STAGE='legacy')
     # Reproduce yhbatch: execute a copy named slurm_script outside the source
     # tree while STRONG_SCALING_DIR points back to the real companion scripts.
     spooled=tmp/'slurm_script'
@@ -239,7 +241,7 @@ out=pathlib.Path(value('--profile-dir'))
                 x=[1,rank+1,20/p+rank,25/p+2*rank,rank/3,rank+2,rank+3,p]
                 for repeat in (1,2):
                     r={key:'unused' for key in analysis['SAMPLE_META']}
-                    r.update(feature_schema='mesh_phase_v2',EXPERIMENT_STAGE='calibration',
+                    r.update(feature_schema='mesh_phase_v2',EXPERIMENT_STAGE='calibration',sampling_protocol='legacy',
                         MESH_INPUT_SHA256='input',MESH_BINARY_SHA256='binary',numlevels='3',numrefine='3',
                         maxh='1000.000000',minh='0.000000',omp_num_threads='1',partition_seed=-1,algorithm='sparse',
                         ranks=p,rank=rank,repeat=repeat,face_complete_elapsed=1,vertex_arrival_elapsed=10)
@@ -266,18 +268,34 @@ out=pathlib.Path(value('--profile-dir'))
     for p in (2,3,4):
         folder=v3_root/f'p{p}/analysis';folder.mkdir(parents=True)
         (folder/'issues.txt').write_text('')
+        preflight=folder.parent/'partition_preflight';preflight.mkdir()
+        report=['seed\tparts\tcoarse_cells\tvariant\tmetis_header\tidx_bits']
+        for seed in (-1,17,41):
+            labels=[(i//3 if seed==-1 else i if seed==17 else i//2)%p for i in range(3*p)]
+            (preflight/f'seed_{seed}.labels').write_text(
+                f'mesh_partition_v1 {p} {3*p} {seed} cell_order_v1\n'+'\n'.join(map(str,labels))+'\n')
+            report.append(f'{seed}\t{p}\t{3*p}\tcell_order_v1\t5.2.1\t32')
+        (preflight/'partitions.tsv').write_text('\n'.join(report)+'\n')
+        identity=dict(zip(fitting['IDENTITY'],['input','binary','3','3','1000','0','1']))
+        preflight_meta=fitting['seal_preflight'](preflight,p,[-1,17,41],'cell_order_v1',identity,'fixture_source',binary)
+        preflight_sha=fitting['digest'](preflight/'manifest.json')
         with gzip.open(folder/'model_samples.csv.gz','wt',newline='') as f:
             w=csv.DictWriter(f,fieldnames=analysis['SAMPLE_FIELDS']);w.writeheader()
             for seed in (-1,17,41):
                 for rank in range(p):
                     x=[1,rank+1,20/p+rank,25/p+2*rank,rank/3,rank+2,rank+3,p]+[
                         (rank+1)*(k+1)+seed/100 for k in range(6)]
-                    for repeat in (1,2):
+                    for repeat in (1,2,3):
                         r={key:'unused' for key in analysis['SAMPLE_META']}
                         r.update(feature_schema='mesh_phase_v3',EXPERIMENT_STAGE='calibration',
                             MESH_INPUT_SHA256='input',MESH_BINARY_SHA256='binary',numlevels='3',numrefine='3',
                             maxh='1000',minh='0',omp_num_threads='1',partition_seed=seed,algorithm='sparse',
-                            ranks=p,rank=rank,repeat=repeat,face_complete_elapsed=1,vertex_arrival_elapsed=10)
+                            MESH_SOURCE_REVISION='fixture_source',sampling_protocol='partition_sampling_v1',
+                            partition_variant='cell_order_v1',rank_shift=(repeat-1)%p,RANKS_PER_NODE='1',
+                            MESH_PREFLIGHT_SHA256=preflight_sha,
+                            MESH_PARTITION_SIGNATURE=preflight_meta['partitions'][str(seed)]['signature'],
+                            ranks=p,rank=(rank+repeat-1)%p,logical_partition=rank,
+                            processor_name=f'node{(rank+repeat-1)%p}',repeat=repeat,face_complete_elapsed=1,vertex_arrival_elapsed=10)
                         r.update({f'x{k}':v for k,v in enumerate(x)})
                         r.update({f'y{k}':0.1+0.2*(k+1)*x[2]+0.02*x[8] for k in range(4)})
                         w.writerow(r)
@@ -286,6 +304,8 @@ out=pathlib.Path(value('--profile-dir'))
     assert meta3['partition_seeds']==[-1,17,41] and len(meta3['validation'])==6
     assert {r['group_kind'] for r in meta3['validation']}=={'ranks','seed'}
     assert len(meta3['feature_ranges'])==14 and meta3['tail_weight']==4
+    assert meta3['identity']['sampling_protocol']=='partition_sampling_v1'
+    assert fitting['sampling_readiness'](v3_root)['ready']
     # Correct ordering at small P must not hide reversed ordering at large P.
     ranking=[dict(ranks=p,seed=-1,rank=i,x=[x],y=[y,0,0,0])
              for p,items in [(2,[(10,10),(9,9)]),(4,[(1,2),(2,1)])]
@@ -303,11 +323,24 @@ out=pathlib.Path(value('--profile-dir'))
     with gzip.open(incomplete,'rt') as f: samples=list(csv.DictReader(f))
     with gzip.open(incomplete,'wt',newline='') as f:
         w=csv.DictWriter(f,fieldnames=analysis['SAMPLE_FIELDS']);w.writeheader()
-        w.writerows(r for r in samples if not (r['partition_seed']=='17' and r['rank']=='1'))
+        w.writerows(r for r in samples if not (r['partition_seed']=='17' and r['logical_partition']=='1'))
     try: fitting['train'](v3_root,8,3,3)
     except ValueError as e: assert 'missing calibration' in str(e)
     else: raise AssertionError('incomplete partition accepted')
     incomplete.write_bytes(original)
+    # 几何样本按逻辑分区归组；节点没有实际改变时不能宣称完成节点对照。
+    with gzip.open(incomplete,'wt',newline='') as f:
+        w=csv.DictWriter(f,fieldnames=analysis['SAMPLE_FIELDS']);w.writeheader()
+        for r in samples:
+            r['processor_name']='same_node';w.writerow(r)
+    assert not fitting['sampling_readiness'](v3_root/f'p2')['ready']
+    incomplete.write_bytes(original)
+    reference=v3_root/'p2/partition_preflight/seed_17.labels';saved=reference.read_bytes()
+    reference.write_text(reference.read_text().replace('\n1\n','\n0\n',1))
+    try: fitting['verify_preflight'](reference.parent)
+    except ValueError: pass
+    else: raise AssertionError('changed preflight membership accepted')
+    reference.write_bytes(saved)
     # New per-rank placement stays outside common run metadata and survives
     # compact export; negative root-only net gain must not be masked by zeros.
     new_profile['metadata'].update(feature_schema='mesh_phase_v3',partition_seed='17')
@@ -332,4 +365,70 @@ out=pathlib.Path(value('--profile-dir'))
     result=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=blocked,capture_output=True,text=True)
     assert result.returncode!=0 and 'needs new multi-seed calibration' in result.stderr
     assert 'yhbatch' not in result.stdout
+    # 第三次迭代的完整工作进程路径：单进程预检先行，三次正式映射，失败不生成细网格。
+    modern=tmp/'modern_mesh'
+    modern.write_text('''#!/usr/bin/env python3
+import json,os,pathlib,sys
+args=sys.argv
+value=lambda name:args[args.index(name)+1]
+audit=pathlib.Path(os.environ['MOCK_AUDIT'])
+if '--preflight-parts' in args:
+    p=int(value('--preflight-parts'));folder=pathlib.Path(value('--preflight-dir'))
+    seeds=list(map(int,value('--preflight-seeds').split()))
+    report=['seed\\tparts\\tcoarse_cells\\tvariant\\tmetis_header\\tidx_bits']
+    for seed in seeds:
+        selected=-1 if os.environ.get('MOCK_DUPLICATE_PREFLIGHT') else seed
+        labels=[(i//3 if selected==-1 else i if selected==17 else i//2)%p for i in range(3*p)]
+        (folder/f'seed_{seed}.labels').write_text(f'mesh_partition_v1 {p} {3*p} {seed} cell_order_v1\\n'+'\\n'.join(map(str,labels))+'\\n')
+        report.append(f'{seed}\\t{p}\\t{3*p}\\tcell_order_v1\\t5.2.1\\t32')
+    (folder/'partitions.tsv').write_text('\\n'.join(report)+'\\n')
+    with audit.open('a') as f:f.write('preflight\\n')
+    sys.exit(0)
+if '--profile-core-only' not in args:sys.exit(13)
+p=int(os.environ['PROCESS_COUNT']);seed=int(value('--partition-seed'))
+repeat=int(value('--profile-repeat'));shift=int(value('--rank-shift'))
+with audit.open('a') as f:f.write(f'fine {seed} {repeat} {shift}\\n')
+metadata={k:os.environ[k] for k in ['MESH_INPUT_SHA256','MESH_BINARY_SHA256','MESH_SOURCE_REVISION',
+    'MESH_MODEL_SHA256','MESH_PARTITION_SIGNATURE','MESH_PREFLIGHT_SHA256','EXPERIMENT_STAGE','RANKS_PER_NODE']}
+metadata.update(feature_schema='mesh_phase_v3',sampling_protocol='partition_sampling_v1',
+    partition_variant='cell_order_v1',rank_shift=str(shift),partition_seed=str(seed),
+    algorithm='sparse',timing_mode='natural',core_only='true',cost_model='geometric_proxy',
+    numlevels=value('-l'),numrefine=value('-r'),maxh=value('--maxh'),minh=value('--minh'),omp_num_threads='1')
+rows=[]
+for logical in range(p):
+    rank=(logical+shift)%p
+    metrics=dict(core_seconds=1,local_volume_elements_before_adjacency=100+logical,
+        logical_partition=logical,face_complete_elapsed=.1,vertex_arrival_elapsed=.8)
+    metrics.update({f'phase_feature_{k}':1 if k==0 else (logical+1)*(k+1)+(seed+1)/100 for k in range(14)})
+    stages={s:dict(seconds=.1,calls=1) for s in ['part_face_create','surface_refine','local_volume_mesh',
+        'volume_refine','adjacency_build','vertex_numbering_local']}
+    rows.append(dict(rank=rank,ranks=p,repeat=repeat,metadata=metadata,metrics=metrics,
+                     stages=stages,processor_name=f'node{rank}'))
+(pathlib.Path(value('--profile-dir'))/'rank_profiles.jsonl').write_text(''.join(json.dumps(r)+'\\n' for r in rows))
+# --algorithm research_1 global_id_bits
+''')
+    modern.chmod(0o755)
+    calibration=dict(env,EXPERIMENT_STAGE='calibration',PROCESS_COUNT='3',RANKS_PER_NODE='1',
+        REPEATS='3',WARMUPS='1',ALGORITHMS='sparse',PARTITION_SEEDS='-1 17 41',
+        RUN_ROOT=str(tmp/'modern_results'),BINARY=str(modern),MOCK_AUDIT=str(tmp/'modern_audit'))
+    modern_run=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=calibration,
+                              capture_output=True,text=True)
+    assert modern_run.returncode==0,(modern_run.stdout,modern_run.stderr)
+    audit=(tmp/'modern_audit').read_text().splitlines()
+    assert audit[0]=='preflight' and len(audit)==13
+    assert {int(line.split()[-1]) for line in audit[1:]}=={0,1,2}
+    modern_p=tmp/'modern_results/p3'
+    assert json.loads((modern_p/'analysis/calibration_status.json').read_text())['ready']
+    assert '通过采样检查' in (modern_p/'RESULT_SUMMARY.txt').read_text()
+    rerun=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=calibration,
+                         capture_output=True,text=True)
+    assert rerun.returncode==0,(rerun.stdout,rerun.stderr)
+    assert (tmp/'modern_audit').read_text().splitlines()==audit
+    bad=dict(calibration,MOCK_DUPLICATE_PREFLIGHT='1',RUN_ROOT=str(tmp/'duplicate_results'),
+             MOCK_AUDIT=str(tmp/'duplicate_audit'))
+    stopped=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=bad,
+                           capture_output=True,text=True)
+    assert stopped.returncode==2,(stopped.stdout,stopped.stderr)
+    assert (tmp/'duplicate_audit').read_text()=='preflight\n'
+    assert '未启动细网格采样' in (tmp/'duplicate_results/p3/RESULT_SUMMARY.txt').read_text()
 print('PASS: Slurm spool path, failure continuation, warmup filtering, compressed resume, lossless analysis, cleanup opt-out, failure/active/symlink protection, configuration guard')

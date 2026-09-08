@@ -15,8 +15,8 @@ export STRONG_SCALING_DIR="${SCRIPT_DIR}"
 # 环境变量仍可覆盖这些默认值，主要供作业脚本内部传递及断点续跑使用。
 # ============================================================================
 EXPERIMENT_PRESET="${EXPERIMENT_PRESET:-production}"
-# 第二轮仍只改本配置区、直接 bash strong_scaling/run_experiments.sh。
-# calibration: v3 多分区采样（既有八特征数据用于归档，不能补造新特征）。
+# 第三次迭代仍只改本配置区、直接 bash strong_scaling/run_experiments.sh。
+# calibration: 先验证真实分区差异，再采样；正式重复轮换分区到节点的映射。
 # evaluation : 从 CALIBRATION_ROOT 自动冻结排除目标规模的模型，运行四组对照。
 # legacy     : 运行第一轮的几何代理模型，用于方法复查。
 EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-calibration}"
@@ -59,8 +59,12 @@ esac
 PROCESS_COUNTS="${PROCESS_COUNTS:-${default_process_counts}}"
 ALGORITHMS="${ALGORITHMS:-${default_algorithms}}"
 TIMING_MODES="${TIMING_MODES:-${default_timings}}"
-# -1 保留原 METIS 默认；17/41 改变分区，用来检验模型的跨分区预测。
+# -1 保留原输入顺序；17/41 用于固定粗单元重排，并检查实际归属确实不同。
 PARTITION_SEEDS="${PARTITION_SEEDS:-${default_seeds}}"
+default_variant=cell_order_v1
+[[ "${EXPERIMENT_STAGE}" == legacy ]] && default_variant=metis_seed
+PARTITION_VARIANT="${PARTITION_VARIANT:-${default_variant}}"
+PLACEMENT_ROTATION="${PLACEMENT_ROTATION:-1}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-16}"
 REPEATS="${REPEATS:-${default_repeats}}"
 WARMUPS="${WARMUPS:-1}"
@@ -90,6 +94,7 @@ export BALANCE_SWEEPS CUT_GROWTH COST_WEIGHTS TIMEOUT_SECONDS START_DELAY_SECOND
 export PARTITION SBATCH_COMMAND SBATCH_EXTRA_ARGS MPI_LAUNCHER MPI_EXTRA_ARGS DRY_RUN INPUT_PATH
 export EXPERIMENT_STAGE CALIBRATION_ROOT MIN_GAIN_SECONDS MIN_GAIN_FRACTION CLOSURE_GROWTH
 export PARTITION_SEEDS SEARCH_SECONDS
+export PARTITION_VARIANT PLACEMENT_ROTATION
 
 # 登录节点：转入提交驱动；计算作业：继续执行下方 worker（工作进程）逻辑。
 if [[ "${MESH_EXPERIMENT_WORKER:-0}" != 1 ]]; then
@@ -124,6 +129,13 @@ for seed in "${seeds[@]}"; do
     seen_seeds[${seed}]=1
 done
 (( ${#seeds[@]} > 0 )) || { echo "Missing partition seeds" >&2; exit 2; }
+[[ "${PARTITION_VARIANT}" == cell_order_v1 || "${PARTITION_VARIANT}" == metis_seed ]] || exit 2
+[[ "${PLACEMENT_ROTATION}" == 0 || "${PLACEMENT_ROTATION}" == 1 ]] || exit 2
+if [[ "${EXPERIMENT_STAGE}" == calibration ]]; then
+    (( ${#seeds[@]} >= 3 && REPEATS >= 3 )) && [[ "${PLACEMENT_ROTATION}" == 1 ]] || {
+        echo "第三次校准需要至少3组分区、3次正式重复及节点轮换；修改统一配置区。" >&2; exit 2;
+    }
+fi
 read -r -a mpi_extra <<< "${MPI_EXTRA_ARGS}"
 for a in "${algorithms[@]}"; do
     case "$a" in baseline|balance|sparse|combined) ;; *) echo "Unknown algorithm: $a" >&2; exit 2;; esac
@@ -141,7 +153,9 @@ done
 # revisions.  That produces ordinary mesh artifacts but no rank profile, and
 # the failure would otherwise be discovered only after many expensive runs.
 binary_error=""
-for marker in "--profile-core-only" "--algorithm" "research_1" "global_id_bits" "mesh_phase_v3"; do
+markers=("--profile-core-only" "--algorithm" "research_1" "global_id_bits" "mesh_phase_v3")
+[[ "${EXPERIMENT_STAGE}" == legacy ]] || markers+=("partition_sampling_v1" "--preflight-parts")
+for marker in "${markers[@]}"; do
     if ! LC_ALL=C grep -aFq -- "${marker}" "${BINARY}"; then
         binary_error="missing capability marker ${marker}"
         break
@@ -170,7 +184,7 @@ if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
     model="${RUN_ROOT}/models/p${PROCESS_COUNT}.model"
     python3 "${SCRIPT_DIR}/fit_cost_model.py" --verify "${model}" --levels "${LEVELS}" --refines "${REFINES}" \
         --target-ranks "${PROCESS_COUNT}" --input-sha "${MESH_INPUT_SHA256}" --binary-sha "${MESH_BINARY_SHA256}" \
-        --maxh "${MAXH}" --minh "${MINH}" --threads "${OMP_NUM_THREADS}"
+        --maxh "${MAXH}" --minh "${MINH}" --threads "${OMP_NUM_THREADS}" --require-sampling --variant "${PARTITION_VARIANT}"
     export MESH_MODEL_SHA256="$(sha256sum "${model}" | cut -d ' ' -f1)"
     model_args=(--phase-model "${model}" --min-gain-seconds "${MIN_GAIN_SECONDS}"
                 --min-gain-fraction "${MIN_GAIN_FRACTION}" --closure-growth "${CLOSURE_GROWTH}"
@@ -189,11 +203,53 @@ status_file="${pdir}/run_status.tsv"
 failure_file="${pdir}/failures.log"
 launch=("${MPI_LAUNCHER}" "${mpi_extra[@]}" -n "${PROCESS_COUNT}")
 case "$(basename "${MPI_LAUNCHER}")" in yhrun|srun)
-    launch+=(-N "$(( (PROCESS_COUNT+RANKS_PER_NODE-1)/RANKS_PER_NODE ))") ;;
+    launch+=(-N "$(( (PROCESS_COUNT+RANKS_PER_NODE-1)/RANKS_PER_NODE ))")
+    [[ "${EXPERIMENT_STAGE}" == legacy ]] || launch+=(--ntasks-per-node "${RANKS_PER_NODE}" --distribution block)
+    ;;
 esac
 common=(-i "${INPUT_PATH}" -l "${LEVELS}" -r "${REFINES}" --maxh "${MAXH}" --minh "${MINH}" -adj
         --balance-sweeps "${BALANCE_SWEEPS:-4}" --cut-growth "${CUT_GROWTH:-0.05}" --cost-weights "${COST_WEIGHTS:-1,1,1,1}"
+        --partition-variant "${PARTITION_VARIANT}"
         "${model_args[@]}")
+config_text="$(printf '%s\n' "${PROCESS_COUNT}" "${ALGORITHMS}" "${TIMING_MODES}" "${REPEATS}" "${WARMUPS}" "${common[@]}" "PARTITION_SEEDS=${PARTITION_SEEDS}" "PLACEMENT_ROTATION=${PLACEMENT_ROTATION}" "RANKS_PER_NODE=${RANKS_PER_NODE}" "SOURCE_REVISION=${MESH_SOURCE_REVISION}" "OMP_NUM_THREADS=${OMP_NUM_THREADS}" "EXPERIMENT_STAGE=${EXPERIMENT_STAGE}" "MODEL_SHA256=${MESH_MODEL_SHA256}"; sha256sum "${BINARY}" "${INPUT_PATH}")"
+if [[ -f "${pdir}/configuration.txt" && "$(cat "${pdir}/configuration.txt")" != "${config_text}" ]]; then
+    echo "Existing results use another configuration; choose a new RUN_ROOT." >&2
+    exit 2
+fi
+printf '%s\n' "${config_text}" > "${pdir}/configuration.txt"
+
+# 每个并行作业先用一个进程检查其正式分区规模，不生成细网格。
+# 只保留三份粗单元归属与一个摘要；失败立即停止本规模的昂贵采样。
+preflight="${pdir}/partition_preflight"
+preflight_failed() {
+    printf '分区预检未通过，未启动细网格采样。请查看 partition_preflight/run.log。\n' > "${pdir}/RESULT_SUMMARY.txt"
+    cat "${pdir}/RESULT_SUMMARY.txt" >&2
+    exit 2
+}
+if [[ "${EXPERIMENT_STAGE}" != legacy ]]; then
+    mkdir -p "${preflight}"
+    preflight_check=(--levels "${LEVELS}" --refines "${REFINES}" --target-ranks "${PROCESS_COUNT}"
+        --input-sha "${MESH_INPUT_SHA256}" --binary-sha "${MESH_BINARY_SHA256}"
+        --maxh "${MAXH}" --minh "${MINH}" --threads "${OMP_NUM_THREADS}"
+        --seeds "${seeds[@]}" --variant "${PARTITION_VARIANT}")
+    if [[ -f "${preflight}/manifest.json" ]]; then
+        python3 "${SCRIPT_DIR}/fit_cost_model.py" --verify-preflight "${preflight}" "${preflight_check[@]}" \
+            >> "${preflight}/run.log" 2>&1 || preflight_failed
+    else
+        probe=("${MPI_LAUNCHER}" "${mpi_extra[@]}" -n 1)
+        case "$(basename "${MPI_LAUNCHER}")" in yhrun|srun) probe+=(-N 1 --ntasks-per-node 1);; esac
+        if ! timeout "${TIMEOUT_SECONDS}" "${probe[@]}" "${BINARY}" \
+            -i "${INPUT_PATH}" -l "${LEVELS}" -r "${REFINES}" --maxh "${MAXH}" --minh "${MINH}" \
+            --algorithm sparse --partition-variant "${PARTITION_VARIANT}" --profile-core-only \
+            --preflight-parts "${PROCESS_COUNT}" --preflight-seeds "${PARTITION_SEEDS}" \
+            --preflight-dir "${preflight}" -o "${preflight}/mesh/" > "${preflight}/run.log" 2>&1; then
+            preflight_failed
+        fi
+        python3 "${SCRIPT_DIR}/fit_cost_model.py" --seal-preflight "${preflight}" \
+            "${preflight_check[@]}" --binary "${BINARY}" >> "${preflight}/run.log" 2>&1 || preflight_failed
+    fi
+    export MESH_PREFLIGHT_SHA256="$(sha256sum "${preflight}/manifest.json" | cut -d ' ' -f1)"
+fi
 # Correctness checks deliberately cannot be combined with timing collection.
 if [[ "${VERIFY_FACES}" == 1 ]]; then
   for seed in "${seeds[@]}"; do
@@ -205,12 +261,6 @@ if [[ "${VERIFY_FACES}" == 1 ]]; then
     done
   done
 fi
-config_text="$(printf '%s\n' "${PROCESS_COUNT}" "${ALGORITHMS}" "${TIMING_MODES}" "${REPEATS}" "${WARMUPS}" "${common[@]}" "PARTITION_SEEDS=${PARTITION_SEEDS}" "SOURCE_REVISION=${MESH_SOURCE_REVISION}" "OMP_NUM_THREADS=${OMP_NUM_THREADS}" "EXPERIMENT_STAGE=${EXPERIMENT_STAGE}" "MODEL_SHA256=${MESH_MODEL_SHA256}"; sha256sum "${BINARY}" "${INPUT_PATH}")"
-if [[ -f "${pdir}/configuration.txt" && "$(cat "${pdir}/configuration.txt")" != "${config_text}" ]]; then
-    echo "Existing results use another configuration; choose a new RUN_ROOT." >&2
-    exit 2
-fi
-printf '%s\n' "${config_text}" > "${pdir}/configuration.txt"
 python3 - "${pdir}/plan.json" "${PROCESS_COUNT}" "${REPEATS}" "${ALGORITHMS}" "${TIMING_MODES}" "${PARTITION_SEEDS}" <<'PLAN'
 import json,pathlib,sys
 path,n,repeats,algorithms,timings,seeds=sys.argv[1:]
@@ -222,8 +272,23 @@ failures=0
 # Negative/zero repeats are warmups. Rotate mode order to avoid always giving
 # one algorithm the first file-cache/allocator state. No cache eviction code.
 for ((rep=1-WARMUPS;rep<=REPEATS;++rep)); do
+  rank_shift=0
+  if [[ "${PLACEMENT_ROTATION}" == 1 && "${EXPERIMENT_STAGE}" != legacy ]] && (( rep>0 )); then
+    stride=$(( (PROCESS_COUNT/RANKS_PER_NODE/3)*RANKS_PER_NODE ))
+    (( stride>=RANKS_PER_NODE )) || stride="${RANKS_PER_NODE}"
+    rank_shift=$(( ((rep-1)%3)*stride%PROCESS_COUNT ))
+  fi
   for ((s=0;s<${#seeds[@]};++s)); do
     seed="${seeds[$(( (s+rep+WARMUPS-1)%${#seeds[@]} ))]}"
+    reference_args=()
+    if [[ "${EXPERIMENT_STAGE}" != legacy ]]; then
+        reference_args=(--partition-reference "${preflight}/seed_${seed}.labels")
+        export MESH_PARTITION_SIGNATURE="$(python3 - "${preflight}/manifest.json" "${seed}" <<'SIGNATURE'
+import json,sys
+print(json.load(open(sys.argv[1]))['partitions'][sys.argv[2]]['signature'])
+SIGNATURE
+        )"
+    fi
     for mode in "${timings[@]}"; do
         for ((j=0;j<${#algorithms[@]};++j)); do
             a="${algorithms[$(( (j+rep+WARMUPS-1)%${#algorithms[@]} ))]}"
@@ -241,7 +306,8 @@ for ((rep=1-WARMUPS;rep<=REPEATS;++rep)); do
             fi
             rm -f "${out}/SUCCESS" "${out}/rank_profiles.jsonl" "${out}/rank_profiles.jsonl.gz" "${out}/run.log.gz"
             touch "${out}/RUNNING"
-            args=("${common[@]}" --algorithm "${a}" --partition-seed "${seed}" --profile-core-only --profile-dir "${out}"
+            args=("${common[@]}" --algorithm "${a}" --partition-seed "${seed}" --rank-shift "${rank_shift}"
+                  "${reference_args[@]}" --profile-core-only --profile-dir "${out}"
                   --profile-experiment "${a}" --profile-repeat "${rep}" -o "${out}/mesh/")
             [[ "${mode}" == natural ]] && args+=(--profile-natural)
             rc=0
@@ -263,5 +329,6 @@ for ((rep=1-WARMUPS;rep<=REPEATS;++rep)); do
     done
   done
 done
+[[ "${EXPERIMENT_STAGE}" == calibration ]] && cleanup_args+=(--require-calibration)
 python3 "${SCRIPT_DIR}/analyze_results.py" "${pdir}" "${cleanup_args[@]}" || exit $?
 ((failures==0)) || exit 1

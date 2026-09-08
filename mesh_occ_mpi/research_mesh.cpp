@@ -71,6 +71,58 @@ bool same_face(const xdMeshFaceInfo &a,const xdMeshFaceInfo &b) {
     return true;
 }
 }
+void RunPartitionPreflight(void *raw) {
+    using namespace mesh_research;
+    int rank;MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+    if(rank!=0) return;
+    auto &config=options();
+    auto *mesh=static_cast<nglib::Ng_Mesh *>(raw);
+    const int ne=nglib::Ng_GetNE(mesh),parts=config.preflight_parts;
+    const int saved_seed=config.partition_seed;
+    try {
+        if(config.preflight_seeds.empty() || ne<parts || parts<=0)
+            throw std::runtime_error("invalid preflight partition count/seeds");
+        std::vector<CoarseCell> graph;
+        std::set<std::vector<int>> memberships;
+        std::set<std::vector<std::array<double,phase_features>>> features;
+        std::ofstream report(config.preflight_dir+"/partitions.tsv");
+        if(!report) throw std::runtime_error("cannot write partition preflight report");
+        report<<"seed\tparts\tcoarse_cells\tvariant\tmetis_header\tidx_bits\n";
+        for(int seed:config.preflight_seeds) {
+            config.partition_seed=seed;
+            std::vector<int> labels(ne,0);
+            if(parts>1) {
+                idx_t *initial=PartitionMesh(mesh,parts);
+                for(int i=0;i<ne;++i) labels[i]=static_cast<int>(initial[i]);
+                std::free(initial);
+            }
+            if(!memberships.insert(canonical_partition(labels,parts)).second)
+                throw std::runtime_error("重复分区：种子未改变粗单元归属，停止细网格采样");
+            if(graph.empty()) graph=coarse_graph(mesh);
+            const auto stats=partition_stats(graph,labels,parts);
+            std::vector<std::array<double,phase_features>> x;
+            for(const auto &stat:stats) {
+                const auto feature=phase_cost_features(stat,config.cost);
+                for(double v:feature) if(!std::isfinite(v) || v<0)
+                    throw std::runtime_error("invalid preflight features");
+                x.push_back(feature);
+            }
+            std::sort(x.begin(),x.end());
+            if(!features.insert(std::move(x)).second)
+                throw std::runtime_error("重复特征集合：不能作为不同几何样本，停止细网格采样");
+            std::ofstream out(config.preflight_dir+"/seed_"+std::to_string(seed)+".labels");
+            out<<"mesh_partition_v1 "<<parts<<' '<<ne<<' '<<seed<<' '<<config.partition_variant<<'\n';
+            for(int p:labels) out<<p<<'\n';
+            out.close();if(!out) throw std::runtime_error("cannot write partition reference");
+            report<<seed<<'\t'<<parts<<'\t'<<ne<<'\t'<<config.partition_variant<<'\t'
+                  <<METIS_VER_MAJOR<<'.'<<METIS_VER_MINOR<<'.'<<METIS_VER_SUBMINOR
+                  <<'\t'<<8*sizeof(idx_t)<<'\n';
+        }
+        report.close();if(!report) throw std::runtime_error("cannot write preflight report");
+        config.partition_seed=saved_seed;
+        std::printf("[预检] %zu 组分区方案的成员关系及特征集合均不同；未生成细网格\n",memberships.size());
+    } catch(const std::exception &e) {protocol_error(MPI_COMM_WORLD,e.what());}
+}
 idx_t *PartitionResearchMesh(void *raw,int parts) {
     using namespace mesh_research;
     auto *mesh=static_cast<nglib::Ng_Mesh *>(raw);
@@ -90,6 +142,8 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
                 for(int i=0;i<ne;++i) part[i]=static_cast<int>(initial[i]);
                 std::free(initial);
             }
+            if(!options().reference_path.empty() && part!=options().reference_labels)
+                throw std::runtime_error("实际划分与预检归属不一致，停止细网格生成");
             std::vector<CoarseCell> graph;
             {
                 scaling::StageScope time("partition_cost_setup","compute");
@@ -103,7 +157,8 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
             all_stats.resize(static_cast<std::size_t>(parts)*stat_count);
             for(int p=0;p<parts;++p) {
                 const auto after=cost_features(result.after[p],options().cost);
-                double *s=all_stats.data()+p*stat_count;
+                const int physical=physical_partition_rank(p,parts,options().rank_shift);
+                double *s=all_stats.data()+physical*stat_count;
                 s[0]=predicted_cost(result.before[p],options().cost);
                 s[1]=predicted_cost(result.after[p],options().cost);
                 s[2]=result.after[p].cells;s[3]=result.after[p].faces;s[4]=result.after[p].volume;
@@ -113,7 +168,7 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
                 for(int k=0;k<phase_features;++k)s[9+k]=x[k];
                 for(int k=0;k<phase_count;++k)s[9+phase_features+k]=y[k];
             }
-            for(int i=0;i<ne;++i)labels[i]=part[i];
+            for(int i=0;i<ne;++i)labels[i]=physical_partition_rank(part[i],parts,options().rank_shift);
             profile.set_metric("partition_cut_before",result.cut_before);
             profile.set_metric("partition_cut_after",result.cut_after);
             profile.set_metric("partition_moves",result.accepted_moves);
@@ -158,6 +213,7 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
     for(int k=0;k<9;++k)profile.set_metric(names[k],local_stats[k]);
     for(int k=0;k<phase_features;++k)profile.set_metric("phase_feature_"+std::to_string(k),local_stats[9+k]);
     for(int k=0;k<phase_count;++k)profile.set_metric("phase_prediction_"+std::to_string(k),local_stats[9+phase_features+k]);
+    profile.set_metric("logical_partition",(static_cast<long long>(rank)-options().rank_shift+parts)%parts);
     return labels;
 }
 void SparseGatherFaceMap(std::map<int,xdMeshFaceInfo> &facemap,

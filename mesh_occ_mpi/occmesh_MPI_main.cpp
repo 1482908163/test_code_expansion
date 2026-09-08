@@ -44,6 +44,10 @@ void print_help() {
          "--min-gain-seconds / --min-gain-fraction : 预计最大耗时下降门槛" << endl <<
          "--closure-growth <比例> : 最终依赖闭包增长预算，默认0" << endl <<
          "--partition-seed <整数> : METIS 分区种子，-1保留库默认" << endl <<
+         "--partition-variant <metis_seed|cell_order_v1> : 库种子/可复现粗单元重排" << endl <<
+         "--rank-shift <整数> : 逻辑分区到物理进程的循环映射，由统一脚本提供" << endl <<
+         "--partition-reference <文件> : 核对预检粗单元归属，由统一脚本提供" << endl <<
+         "--preflight-parts / --preflight-seeds / --preflight-dir : 仅分区预检，由统一脚本提供" << endl <<
          "--search-seconds <秒> : v3 候选搜索时间预算，默认0.35" << endl <<
          "--verify-faces : 与全收集结果核对；仅用于小规模正确性运行" << endl <<
          "--profile-natural : 采集自然运行时间，关闭诊断用前置屏障" << endl <<
@@ -170,7 +174,10 @@ int main(int argc, char **argv) {
                 !strcmp(argv[i],"--cut-growth") || !strcmp(argv[i],"--cost-weights") ||
                 !strcmp(argv[i],"--phase-model") || !strcmp(argv[i],"--min-gain-seconds") ||
                 !strcmp(argv[i],"--min-gain-fraction") || !strcmp(argv[i],"--closure-growth") ||
-                !strcmp(argv[i],"--partition-seed") || !strcmp(argv[i],"--search-seconds")) {
+                !strcmp(argv[i],"--partition-seed") || !strcmp(argv[i],"--search-seconds") ||
+                !strcmp(argv[i],"--partition-variant") || !strcmp(argv[i],"--rank-shift") ||
+                !strcmp(argv[i],"--partition-reference") || !strcmp(argv[i],"--preflight-parts") ||
+                !strcmp(argv[i],"--preflight-seeds") || !strcmp(argv[i],"--preflight-dir")) {
             const std::string option=argv[i];
             if(i+1>=argc) { if(id==0) print_help(); MPI_Abort(MPI_COMM_WORLD,2); }
             const std::string value=argv[++i];
@@ -179,6 +186,25 @@ int main(int argc, char **argv) {
                 std::size_t consumed=0;
                 if(option=="--algorithm") research.algorithm=value;
                 else if(option=="--phase-model") research.model_path=value;
+                else if(option=="--partition-variant") research.partition_variant=value;
+                else if(option=="--partition-reference") research.reference_path=value;
+                else if(option=="--preflight-dir") research.preflight_dir=value;
+                else if(option=="--rank-shift" || option=="--preflight-parts") {
+                    const int n=std::stoi(value,&consumed);
+                    if(consumed!=value.size() || n<0) throw std::runtime_error("invalid placement/preflight count");
+                    if(option=="--rank-shift") research.rank_shift=n;
+                    else research.preflight_parts=n;
+                }
+                else if(option=="--preflight-seeds") {
+                    std::string list=value;std::replace(list.begin(),list.end(),',',' ');
+                    std::istringstream in(list);std::string field;std::set<int> seen;
+                    while(in>>field) {
+                        const int seed=std::stoi(field,&consumed);
+                        if(consumed!=field.size() || seed< -1 || !seen.insert(seed).second)
+                            throw std::runtime_error("invalid preflight seeds");
+                        research.preflight_seeds.push_back(seed);
+                    }
+                }
                 else if(option=="--partition-seed") {
                     research.partition_seed=std::stoi(value,&consumed);
                     if(consumed!=value.size() || research.partition_seed< -1)
@@ -261,6 +287,9 @@ int main(int argc, char **argv) {
     if ((research.algorithm!="baseline" && research.algorithm!="balance" &&
          research.algorithm!="sparse" && research.algorithm!="combined") ||
         (research.verify_faces && (!research.sparse() || profile_enabled)) ||
+        (research.partition_variant!="metis_seed" && research.partition_variant!="cell_order_v1") ||
+        research.rank_shift>=p ||
+        (research.preflight_parts>0 && (research.preflight_dir.empty() || research.preflight_seeds.empty())) ||
         numlevels<0 || numrefine<0 || numlevels+numrefine>13 ||
         research.cost.sweeps<0 || !std::isfinite(research.cost.cut_growth) ||
         research.cost.cut_growth<0) {
@@ -302,13 +331,17 @@ int main(int argc, char **argv) {
     profiler.add_metadata("profiler_schema_version", "research_1");
     profiler.add_metadata("feature_schema", "mesh_phase_v3");
     profiler.add_metadata("partition_seed",std::to_string(research.partition_seed));
+    profiler.add_metadata("partition_variant",research.partition_variant);
+    profiler.add_metadata("rank_shift",std::to_string(research.rank_shift));
+    profiler.add_metadata("sampling_protocol",research.reference_path.empty()?"legacy":"partition_sampling_v1");
     profiler.add_metadata("algorithm",research.algorithm);
     profiler.add_metadata("timing_mode",profile_split?"split":"natural");
     profiler.add_metadata("timing_boundary","post_coarse_barrier_to_adjacency_complete");
     profiler.add_metadata("core_only",profile_core_only?"true":"false");
     profiler.add_metadata("partition_contract","one partition per MPI rank");
     profiler.add_metadata("cost_model",research.model_path.empty()?"geometric_proxy":"phase_seconds");
-    for(const char *key:{"MESH_INPUT_SHA256","MESH_BINARY_SHA256","MESH_SOURCE_REVISION","MESH_MODEL_SHA256","EXPERIMENT_STAGE"}) {
+    for(const char *key:{"MESH_INPUT_SHA256","MESH_BINARY_SHA256","MESH_SOURCE_REVISION","MESH_MODEL_SHA256","EXPERIMENT_STAGE",
+                        "MESH_PARTITION_SIGNATURE","MESH_PREFLIGHT_SHA256","RANKS_PER_NODE"}) {
         const char *v=std::getenv(key);profiler.add_metadata(key,v?v:"unset");
     }
     profiler.add_metadata("cut_growth",std::to_string(research.cost.cut_growth));
@@ -519,8 +552,20 @@ int main(int argc, char **argv) {
     }
 
 
+    // 参考归属在已有粗网格结束屏障之前读取；正式划分仍在核心区间重新执行。
+    if(id==0 && !research.reference_path.empty()) {
+        try {research.reference_labels=mesh_research::read_partition_reference(research.reference_path,
+                p,nglib::Ng_GetNE(occ_mesh),research.partition_seed,research.partition_variant);}
+        catch(const std::exception &e) {std::cerr<<e.what()<<std::endl;MPI_Abort(MPI_COMM_WORLD,2);}
+    }
     if(id == 0) cout << "Generate Coarse Mesh Done..." << endl;
     MPI_Barrier(MPI_COMM_WORLD);
+
+    if(research.preflight_parts>0) {
+        RunPartitionPreflight(occ_mesh);
+        MPI_Finalize();
+        return 0;
+    }
 
 
     // double Coarse_endTime = clock();
@@ -634,7 +679,11 @@ int main(int argc, char **argv) {
         double volumeMesh_start = MPI_Wtime();
         {
             scaling::StageScope profile_stage("local_volume_mesh", "compute");
-            nglib::Ng_GenerateVolumeMesh(submesh, &nmp);
+            const auto local_status=nglib::Ng_GenerateVolumeMesh(submesh, &nmp);
+            if(local_status!=nglib::NG_OK) {
+                std::cerr<<"局部体网格生成失败，进程 "<<id<<std::endl;
+                MPI_Abort(MPI_COMM_WORLD,3);
+            }
         }
         double volumeMesh_end = MPI_Wtime();
         //MPI_Barrier(MPI_COMM_WORLD);

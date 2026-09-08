@@ -1,4 +1,5 @@
 #include "partition_cost.h"
+#include "partition_sampling.h"
 #include <cassert>
 #include <iostream>
 #include <random>
@@ -9,6 +10,26 @@ static double max_work(const std::vector<PartCost> &s,const CostConfig &cfg) {
 }
 static void close(double a,double b) {assert(std::abs(a-b)<1e-8*std::max(1.0,std::abs(a)));}
 int main() {
+    // 第三次迭代：重排可复现、归属签名忽略标签置换、轮换为双射。
+    const auto identity=sampling_cell_order(26411,-1,true);
+    assert(identity==sampling_cell_order(26411,17,false));
+    const auto order=sampling_cell_order(26411,17,true);
+    assert(order==sampling_cell_order(26411,17,true));
+    assert(order!=identity && order!=sampling_cell_order(26411,41,true));
+    auto sorted=order;std::sort(sorted.begin(),sorted.end());assert(sorted==identity);
+    assert(canonical_partition({0,0,1,1,2,2},3)==canonical_partition({2,2,0,0,1,1},3));
+    assert(canonical_partition({0,0,1,1,2,2},3)!=canonical_partition({0,1,0,1,2,2},3));
+    for(int count:{1,2,3,64,8192}) for(int shift:{0,count/2}) {
+        std::set<int> physical;
+        for(int p=0;p<count;++p) {
+            int rank=physical_partition_rank(p,count,shift);physical.insert(rank);
+            assert((rank-shift+count)%count==p);
+        }
+        assert(static_cast<int>(physical.size())==count);
+    }
+    bool empty_rejected=false;
+    try {canonical_partition({0,0,0},2);} catch(const std::runtime_error &) {empty_rejected=true;}
+    assert(empty_rejected);
     CostConfig cfg;cfg.levels=2;cfg.refines=2;cfg.sweeps=10;
     std::mt19937 rng(71);
     for(int repeat=0;repeat<100;++repeat) {

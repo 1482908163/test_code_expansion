@@ -122,9 +122,12 @@ idx_t *PartitionMetis(void *mesh, int numParts, idx_t *eptr, idx_t *eind, idx_t 
 	i = 0;
 
 	//获取元素的节点索引，并将其存储在 eind 数组中。
+	const auto order=mesh_research::sampling_cell_order(static_cast<int>(ne),
+		mesh_research::options().partition_seed,
+		mesh_research::options().partition_variant=="cell_order_v1");
 	for (elemno = 1; elemno <= ne; elemno++)
 	{
-		nglib::Ng_GetVolumeElement(ngMesh, elemno, vrts, domainidx);
+		nglib::Ng_GetVolumeElement(ngMesh, order[elemno-1]+1, vrts, domainidx);
 		eind[i++] = vrts[0] - 1;
 		eind[i++] = vrts[1] - 1;
 		eind[i++] = vrts[2] - 1;
@@ -140,6 +143,10 @@ idx_t *PartitionMetis(void *mesh, int numParts, idx_t *eptr, idx_t *eind, idx_t 
 	rc = METIS_PartMeshDual(&ne, &nn, eptr, eind, NULL, NULL, &ncommon, &metis_parts, NULL, options,
 							&objval, edest, ndest);
 	if(rc!=METIS_OK) throw std::runtime_error("METIS mesh partition failed");
+	// 仅改变交给划分器的行顺序；结果立即还原到原粗单元编号。
+	std::vector<idx_t> restored(static_cast<std::size_t>(ne));
+	for(int row=0;row<ne;++row) restored[order[row]]=edest[row];
+	std::copy(restored.begin(),restored.end(),edest);
 	// printf("MY: metis objval = 9%d\n",objval);
 	// printf("Partipartition succeeded!");
 	//返回 edest 数组，其中包含了元素的目标划分信息

@@ -15,15 +15,18 @@ import tempfile
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
+from fit_cost_model import sampling_readiness
 
 COMPUTE = ("part_face_create", "surface_refine", "local_volume_mesh",
            "volume_refine", "adjacency_build", "vertex_numbering_local")
 PHASES = (COMPUTE[:2], (COMPUTE[2],), (COMPUTE[3],), COMPUTE[4:])
 SAMPLE_META = ("feature_schema", "EXPERIMENT_STAGE", "MESH_INPUT_SHA256", "MESH_BINARY_SHA256",
-               "MESH_SOURCE_REVISION", "MESH_MODEL_SHA256", "numlevels", "numrefine", "maxh", "minh", "omp_num_threads", "partition_seed")
+               "MESH_SOURCE_REVISION", "MESH_MODEL_SHA256", "numlevels", "numrefine", "maxh", "minh", "omp_num_threads", "partition_seed",
+               "sampling_protocol", "partition_variant", "rank_shift", "RANKS_PER_NODE",
+               "MESH_PARTITION_SIGNATURE", "MESH_PREFLIGHT_SHA256")
 SAMPLE_FIELDS = list(SAMPLE_META)+["algorithm", "ranks", "rank", "repeat"]+[
     f"x{k}" for k in range(14)]+[f"y{k}" for k in range(4)]+[
-    "face_complete_elapsed", "vertex_arrival_elapsed", "processor_name"]
+    "face_complete_elapsed", "vertex_arrival_elapsed", "processor_name", "logical_partition", "volume_elements"]
 
 def profile_path(directory):
     raw = directory/"rank_profiles.jsonl"
@@ -184,6 +187,12 @@ def inspect(path, sample_sink=None):
             sample={k:metadata.get(k, "unset") for k in SAMPLE_META}
             sample["partition_seed"]=result["partition_seed"]
             sample["processor_name"]=r.get("processor_name","unset")
+            sample["logical_partition"]=int(r["metrics"].get("logical_partition",r["rank"]))
+            sample["volume_elements"]=r["metrics"].get("local_volume_elements_before_adjacency",0)
+            if metadata.get("sampling_protocol")=="partition_sampling_v1":
+                shift=int(metadata["rank_shift"]);logical=sample["logical_partition"]
+                if not 0<=logical<n or not 0<=shift<n or (logical+shift)%n!=r["rank"]:
+                    raise ValueError("logical partition/physical rank mapping mismatch")
             sample.update(algorithm=metadata["algorithm"], ranks=n, rank=r["rank"], repeat=r["repeat"])
             sample.update({f"x{k}":r["metrics"][f"phase_feature_{k}"] for k in range(features)})
             sample.update({f"y{k}":sum(seconds(r, s) for s in phase) for k,phase in enumerate(PHASES)})
@@ -249,12 +258,17 @@ def write_overview(root, runs, summaries, errors):
     """One human-facing result file; CSV files remain machine-readable details."""
     expected = expected_runs(root)
     complete = len(runs) == expected and not errors
+    readiness=sampling_readiness(root)
+    if readiness is not None:
+        (root/"analysis/calibration_status.json").write_text(json.dumps(readiness,ensure_ascii=False,indent=2)+"\n")
     lines = [
         "实验结果总览 / Experiment result overview",
         "=" * 56,
         f"状态: {'完整，可分析' if complete else '不完整，不可直接比较'}",
         f"有效正式运行: {len(runs)} / {expected}",
         f"异常项: {len(errors)}",
+        *( ["校准可用性: "+("通过采样检查" if readiness["ready"] else "未通过，不能进入评价"),
+            "说明: "+readiness["message"]] if readiness is not None else [] ),
         "",
         "优先查看：",
         "1. 本文件：快速判断实验是否完整及主要指标。",
@@ -291,6 +305,7 @@ def main():
     parser.add_argument("root", type=Path)
     parser.add_argument("--keep-artifacts", action="store_true", help="skip mesh cleanup and lossless compression")
     parser.add_argument("--finish-run", action="store_true", help="runner: validate one completed run, then retain its measurements")
+    parser.add_argument("--require-calibration",action="store_true",help="采样完整后还必须通过分区多样性与节点轮换检查")
     args = parser.parse_args()
     if args.finish_run:
         try:
@@ -392,6 +407,10 @@ def main():
         sample_tmp.unlink()
     expected, complete = write_overview(args.root, runs, summaries, errors)
     print(f"RESULT: {len(runs)}/{expected} measured runs, {len(errors)} issues; read {args.root/'RESULT_SUMMARY.txt'}")
+    if args.require_calibration:
+        path=output/"calibration_status.json"
+        if not complete or not path.exists() or not json.loads(path.read_text())["ready"]:
+            raise SystemExit("采样检查未通过，请查看 RESULT_SUMMARY.txt；已完成的测量保留")
     if not runs:
         raise SystemExit(1)
     # Reporting succeeds before deletion. Recheck under the lock: a resumed job

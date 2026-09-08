@@ -29,7 +29,7 @@ if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
         exit 2
     }
     python3 "${SCRIPT_DIR}/fit_cost_model.py" --calibration-root "${CALIBRATION_ROOT}" \
-        --target-ranks "${counts[@]}" --levels "${LEVELS}" --refines "${REFINES}" --output "${RUN_ROOT}/models" --require-v3
+        --target-ranks "${counts[@]}" --levels "${LEVELS}" --refines "${REFINES}" --output "${RUN_ROOT}/models" --require-v3 --require-sampling
 fi
 printf '%s\n' "${counts[@]}" > "${RUN_ROOT}/requested_process_counts.txt"
 failures=0
