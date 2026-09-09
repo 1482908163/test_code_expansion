@@ -13,6 +13,7 @@
 #include "mpi_debug.h"
 #include "mesh_mpi_types.h"
 #include "research_mesh.h"
+#include "task_mesh.h"
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <cstdlib>
@@ -47,6 +48,7 @@ void print_help() {
          "--partition-seed <整数> : METIS 分区种子，-1保留库默认" << endl <<
          "--partition-variant <metis_seed|cell_order_v1> : 库种子/可复现粗单元重排" << endl <<
          "--rank-shift <整数> : 逻辑分区到物理进程的循环映射，由统一脚本提供" << endl <<
+         "--mesh-tasks / --task-cut-growth : 固定封闭子域任务数 / 跨节点面增长预算" << endl <<
          "--partition-reference <文件> : 核对预检粗单元归属，由统一脚本提供" << endl <<
          "--preflight-parts / --preflight-seeds / --preflight-dir : 仅分区预检，由统一脚本提供" << endl <<
          "--search-seconds <秒> : v3 候选搜索时间预算，默认0.35" << endl <<
@@ -179,7 +181,8 @@ int main(int argc, char **argv) {
                 !strcmp(argv[i],"--partition-seed") || !strcmp(argv[i],"--search-seconds") ||
                 !strcmp(argv[i],"--partition-variant") || !strcmp(argv[i],"--rank-shift") ||
                 !strcmp(argv[i],"--partition-reference") || !strcmp(argv[i],"--preflight-parts") ||
-                !strcmp(argv[i],"--preflight-seeds") || !strcmp(argv[i],"--preflight-dir")) {
+                !strcmp(argv[i],"--preflight-seeds") || !strcmp(argv[i],"--preflight-dir") ||
+                !strcmp(argv[i],"--mesh-tasks") || !strcmp(argv[i],"--task-cut-growth")) {
             const std::string option=argv[i];
             if(i+1>=argc) { if(id==0) print_help(); MPI_Abort(MPI_COMM_WORLD,2); }
             const std::string value=argv[++i];
@@ -187,6 +190,15 @@ int main(int argc, char **argv) {
                 auto &research=mesh_research::options();
                 std::size_t consumed=0;
                 if(option=="--algorithm") research.algorithm=value;
+                else if(option=="--mesh-tasks") {
+                    research.mesh_tasks=std::stoi(value,&consumed);
+                    if(consumed!=value.size() || research.mesh_tasks<0)throw std::runtime_error("invalid task count");
+                }
+                else if(option=="--task-cut-growth") {
+                    research.task_cut_growth=std::stod(value,&consumed);
+                    if(consumed!=value.size() || !std::isfinite(research.task_cut_growth) || research.task_cut_growth<0 || research.task_cut_growth>1)
+                        throw std::runtime_error("task cut growth must be in [0,1]");
+                }
                 else if(option=="--phase-model") research.model_path=value;
                 else if(option=="--resource-model") research.resource_path=value;
                 else if(option=="--rank-capacities") research.capacity_path=value;
@@ -277,6 +289,12 @@ int main(int argc, char **argv) {
     }
 
     auto &research = mesh_research::options();
+    if(research.mesh_tasks>0 && (p<2 || research.mesh_tasks<p-1 || research.rank_shift!=0 ||
+       !research.model_path.empty() || !research.resource_path.empty() || !research.capacity_path.empty() ||
+       !research.reference_path.empty() || research.preflight_parts>0)) {
+        if(id==0)std::cerr<<"任务调度需至少两进程、足够任务，不使用离线模型和历史分区预检。"<<std::endl;
+        MPI_Abort(MPI_COMM_WORLD,2);
+    }
     research.cost.levels=numlevels;research.cost.refines=numrefine;
     // Only rank zero evaluates partitions. Load the immutable small model once,
     // before coarse meshing; do not issue thousands of shared-filesystem reads.
@@ -352,7 +370,9 @@ int main(int argc, char **argv) {
     profiler.add_metadata("adjacency_enabled", isComputeAdj ? "true" : "false");
     profiler.add_metadata("save_vol", save_vol ? "true" : "false");
     profiler.add_metadata("profiler_schema_version", "research_1");
-    profiler.add_metadata("feature_schema", "mesh_phase_v3");
+    profiler.add_metadata("feature_schema", research.mesh_tasks>0?"mesh_tasks_v1":"mesh_phase_v3");
+    profiler.add_metadata("mesh_tasks",std::to_string(research.mesh_tasks));
+    profiler.add_metadata("active_workers",std::to_string(research.mesh_tasks>0?p-1:p));
     profiler.add_metadata("partition_seed",std::to_string(research.partition_seed));
     profiler.add_metadata("partition_variant",research.partition_variant);
     profiler.add_metadata("rank_shift",std::to_string(research.rank_shift));
@@ -361,10 +381,10 @@ int main(int argc, char **argv) {
     profiler.add_metadata("timing_mode",profile_split?"split":"natural");
     profiler.add_metadata("timing_boundary","post_coarse_barrier_to_adjacency_complete");
     profiler.add_metadata("core_only",profile_core_only?"true":"false");
-    profiler.add_metadata("partition_contract","one partition per MPI rank");
-    profiler.add_metadata("cost_model",!research.resource_path.empty()?"phase_seconds_resource":
-        (research.model_path.empty()?"geometric_proxy":"phase_seconds"));
-    profiler.add_metadata("balance_method",research.resource_path.empty()?"boundary":"node_mapping");
+    profiler.add_metadata("partition_contract",research.mesh_tasks>0?"fixed closed tasks; rank zero dispatcher":"one partition per MPI rank");
+    profiler.add_metadata("cost_model",research.mesh_tasks>0?"none_task_queue":(!research.resource_path.empty()?"phase_seconds_resource":
+        (research.model_path.empty()?"geometric_proxy":"phase_seconds")));
+    profiler.add_metadata("balance_method",research.mesh_tasks>0?"task_queue":(research.resource_path.empty()?"boundary":"node_mapping"));
     for(const char *key:{"MESH_INPUT_SHA256","MESH_BINARY_SHA256","MESH_SOURCE_REVISION","MESH_MODEL_SHA256","EXPERIMENT_STAGE",
                         "MESH_PARTITION_SIGNATURE","MESH_PREFLIGHT_SHA256","RANKS_PER_NODE","MESH_CAPACITY_SHA256"}) {
         const char *v=std::getenv(key);profiler.add_metadata(key,v?v:"unset");
@@ -606,9 +626,7 @@ int main(int argc, char **argv) {
         double time_part1_detail[6] = {0,0,0,0,0,0};
         //Set the number of partitions
         int numParts = p;
-        // Current algorithmic contract: one METIS partition is owned by one
-        // MPI rank.  Record it explicitly so experiment reports do not confuse
-        // Slurm nodes, MPI ranks, and mesh partitions.
+        // 最终输出仍按物理进程组织；任务模式的逻辑子域数另记 task_count。
         profiler.set_metric("partition_count", static_cast<double>(numParts));
         FILE *fp;
         FILE *fp_time;
@@ -639,6 +657,12 @@ int main(int argc, char **argv) {
         }
 
         idx_t *edest = nullptr;
+        int i;
+        double volumeMesh_start=0,volumeMesh_end=0;
+        if(research.mesh_tasks>0) {
+            volumeMesh_end=GenerateScheduledTasks(occ_mesh,submesh,research.mesh_tasks,numlevels,maxbarycoord,
+                                   facemap,g2lvrtxmap,baryc2locvrtxmap,newfaces);
+        } else {
         {
             scaling::StageScope profile_stage("metis_partition", "compute");
             edest = PartitionResearchMesh(occ_mesh, numParts);
@@ -695,13 +719,11 @@ int main(int argc, char **argv) {
         //The face mesh grid is refined in parallel to each partition.
 
 
-        int i;
-
         nglib::Ng_Meshing_Parameters nmp;
         //nmp.maxh = 1e6;
         nmp.fineness = 1;
 
-        double volumeMesh_start = MPI_Wtime();
+        volumeMesh_start = MPI_Wtime();
         {
             scaling::StageScope profile_stage("local_volume_mesh", "compute");
             const auto local_status=nglib::Ng_GenerateVolumeMesh(submesh, &nmp);
@@ -710,11 +732,12 @@ int main(int argc, char **argv) {
                 MPI_Abort(MPI_COMM_WORLD,3);
             }
         }
-        double volumeMesh_end = MPI_Wtime();
+        volumeMesh_end = MPI_Wtime();
         //MPI_Barrier(MPI_COMM_WORLD);
         if(id == 0) printf("meshing done \n");
         double currtime4 = MPI_Wtime();
         time[4] = double(currtime4 - currtime3);
+        }
 
         {
             scaling::StageScope profile_stage("volume_refine", "compute");

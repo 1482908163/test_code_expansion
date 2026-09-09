@@ -15,6 +15,8 @@ struct ResearchOptions {
     std::string reference_path, preflight_dir;
     std::vector<int> reference_labels, preflight_seeds;
     int rank_shift = 0, preflight_parts = 0;
+    int mesh_tasks = 0; // 0 保留历史单分区路径。
+    double task_cut_growth = 0.10;
     bool verify_faces = false;
     bool sparse() const { return algorithm == "sparse" || algorithm == "combined"; }
     bool balance() const { return algorithm == "balance" || algorithm == "combined"; }

@@ -245,6 +245,41 @@ def inspect(path, sample_sink=None):
                 for r,a in zip(rows,actual))/sum(actual) if metadata["cost_model"].startswith("phase_seconds") and sum(actual)>0 else None)
         if sample_sink is not None and not split and rows[0]["repeat"]>0:
             sample_sink.writerows(samples)
+    if metadata.get("feature_schema")=="mesh_tasks_v1":
+        count=int(metadata["mesh_tasks"])
+        if n<2 or count<n-1 or int(metadata["active_workers"])!=n-1:
+            raise ValueError("invalid task/worker configuration")
+        root=next(r for r in rows if r["rank"]==0)
+        completed=[r["metrics"].get("tasks_completed",-1) for r in rows]
+        if any(v<0 or int(v)!=v for v in completed) or sum(completed)!=count or root["metrics"]["tasks_completed"]!=0:
+            raise ValueError("task coverage mismatch")
+        for r in rows:
+            k=r["metrics"]["tasks_completed"]
+            if any(r["stages"].get(stage,{}).get("calls",0)!=k for stage in COMPUTE[:3]):
+                raise ValueError("task compute calls do not match completed tasks")
+        signature=metadata["task_mesh_signature"]
+        if not re.fullmatch(r"[0-9a-f]{1,16}",signature):
+            raise ValueError("invalid task mesh signature")
+        generated=root["metrics"]["task_generated_elements_global"]
+        if generated<=0 or sum(tets)!=generated*8**int(metadata["numrefine"]):
+            raise ValueError("task merge/refinement changed volume element count")
+        before=root["metrics"]["task_cross_node_faces_before"]
+        after=root["metrics"]["task_cross_node_faces_after"]
+        limit=root["metrics"]["task_cross_node_faces_limit"]
+        if min(before,after)<0 or after>limit or before>limit:
+            raise ValueError("task communication budget exceeded")
+        worker_compute=[c for r,c in zip(rows,compute) if r["rank"]!=0]
+        result.update(task_count=count,task_signature=signature,
+                      active_workers=n-1,compute_max_seconds=max(worker_compute),
+                      compute_mean_seconds=mean(worker_compute),
+                      compute_imbalance=max(worker_compute)/mean(worker_compute) if mean(worker_compute) else None,
+                      task_cross_node_faces_before=before,task_cross_node_faces_after=after,
+                      task_cross_node_faces_limit=limit,
+                      task_moved_between_nodes=root["metrics"]["task_moved_between_nodes"])
+        for stage in ("task_completion_wait","task_dispatch","task_geometry_setup","task_merge","metis_partition"):
+            result[stage+"_max_seconds"]=max(seconds(r,stage) for r in rows)
+        result["task_control_receive_bytes"]=sum(r["stages"].get("task_dispatch",{}).get("receive_bytes",0)+
+            r["stages"].get("task_metadata",{}).get("receive_bytes",0) for r in rows)
     return result, detail
 
 def write_csv(path, rows):
@@ -305,7 +340,13 @@ def write_overview(root, runs, summaries, errors):
             compact(received/(1024**3) if received is not None else None),
             compact(row.get("speedup_vs_baseline")), compact(row.get("speedup_vs_sparse")),
         )))
-        if row["algorithm"] in ("balance","combined"):
+        if row.get("task_count_median"):
+            lines.append("  任务调度：任务数="+compact(row["task_count_median"],0)+
+                         "；计算进程="+str(row["ranks"]-1)+"（另 1 进程管理队列）"+
+                         "；任务结束等待="+compact(row.get("task_completion_wait_max_seconds_median"))+
+                         "；领取开销="+compact(row.get("task_dispatch_max_seconds_median"))+
+                         "；合并开销="+compact(row.get("task_merge_max_seconds_median"))+" s")
+        elif row["algorithm"] in ("balance","combined"):
             if row.get("mapping_moved_nodes_median",0):
                 lines.append("  节点映射：移动节点数="+compact(row["mapping_moved_nodes_median"])+
                              "；预测收益="+compact(row.get("mapping_predicted_gain_seconds_median"))+" s（非实测加速）")
@@ -370,6 +411,12 @@ def main():
                 stage_rows.append(identity)
         except (OSError, EOFError, ValueError, KeyError, TypeError) as error:
             errors.append(f"{directory}: {error}")
+    task_groups=defaultdict(list)
+    for r in runs:
+        if "task_signature" in r:task_groups[r["task_count"],r["partition_seed"]].append(r)
+    for key,group in task_groups.items():
+        if len({r["task_signature"] for r in group})!=1 or len({r["volume_elements_sum"] for r in group})!=1:
+            errors.append(f"任务网格不一致 (tasks,seed)={key}：不能作为固定工作量的调度对照")
     present_runs = {(r["algorithm"], r["timing"], r["ranks"], r["partition_seed"], r["repeat"]) for r in runs}
     if len(present_runs)!=len(runs): errors.append("Duplicate run identity (algorithm, timing, ranks, seed, repeat)")
     for plan_path in args.root.rglob("plan.json"):
@@ -390,7 +437,7 @@ def main():
         summary = dict(algorithm=algorithm, timing=timing, ranks=ranks, partition_seed=seed, successful_repeats=len(group),
                        core_median=st.median(values), core_cv=st.stdev(values)/mean(values) if len(values)>1 else None)
         for name in runs[0]:
-            if name in ("algorithm", "timing", "ranks", "partition_seed", "repeat", "core_seconds"):
+            if name in ("algorithm", "timing", "ranks", "partition_seed", "repeat", "core_seconds", "task_signature"):
                 continue
             present = [r[name] for r in group if r.get(name) is not None]
             summary[name+"_median"] = st.median(present) if present else None
@@ -422,7 +469,7 @@ def main():
     write_csv(output/"summary.csv", summaries)
     (output/"issues.txt").write_text("\n".join(errors)+( "\n" if errors else ""))
     sample_stream.close()
-    if any("compute_max_seconds" in r for r in runs):
+    if any("compute_max_seconds" in r and "task_count" not in r for r in runs):
         os.replace(sample_tmp,output/"model_samples.csv.gz")
     else:
         sample_tmp.unlink()

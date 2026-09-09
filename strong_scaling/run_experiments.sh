@@ -15,13 +15,10 @@ export STRONG_SCALING_DIR="${SCRIPT_DIR}"
 # 环境变量仍可覆盖这些默认值，主要供作业脚本内部传递及断点续跑使用。
 # ============================================================================
 EXPERIMENT_PRESET="${EXPERIMENT_PRESET:-production}"
-# 第四次迭代：production 默认直接评价；pilot 保留小规模采样入口。
-# node_mapping: 固定分区的节点组映射；boundary: 保留历史边界移动方法。
-# 已有第三次校准用于同规模训练 -1/17，正式评价使用留出的 41。
-default_stage=evaluation
-[[ "${EXPERIMENT_PRESET}" == pilot ]] && default_stage=calibration
-EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-${default_stage}}"
-BALANCE_METHOD="${BALANCE_METHOD:-node_mapping}"
+# 本轮默认任务调度：固定封闭子域、按需领取，不训练模型或额外参考预热。
+# boundary / node_mapping 仅保留历史实验的复现入口。
+EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-evaluation}"
+BALANCE_METHOD="${BALANCE_METHOD:-task_queue}"
 CALIBRATION_ROOT="${CALIBRATION_ROOT:-${SCRIPT_DIR}/../strong_scaling_results/mesh_algorithms_20260908-135236}"
 MIN_GAIN_SECONDS="${MIN_GAIN_SECONDS:-0.35}"
 MIN_GAIN_FRACTION="${MIN_GAIN_FRACTION:-0.05}"
@@ -38,19 +35,21 @@ case "${EXPERIMENT_STAGE}" in
         default_algorithms="baseline balance sparse combined"
         default_timings="natural split"
         default_seeds="-1"
-        [[ "${EXPERIMENT_STAGE}" == evaluation && "${BALANCE_METHOD}" == node_mapping ]] && default_seeds="41"
+        [[ "${EXPERIMENT_STAGE}" == evaluation && "${BALANCE_METHOD}" != boundary ]] && default_seeds="41"
         default_repeats=5
         ;;
     *) echo "EXPERIMENT_STAGE must be calibration, evaluation or legacy" >&2; exit 2 ;;
 esac
 case "${EXPERIMENT_PRESET}" in
     pilot)
+        default_tasks=128
         default_process_counts="16 32 64"
         default_levels=1
         default_refines=1
         default_verify_faces=1
         ;;
     production)
+        default_tasks=16384
         default_process_counts="1024 2048 4096 8192"
         default_levels=3
         default_refines=3
@@ -59,6 +58,8 @@ case "${EXPERIMENT_PRESET}" in
     *) echo "EXPERIMENT_PRESET must be pilot or production" >&2; exit 2 ;;
 esac
 
+TASK_COUNT="${TASK_COUNT:-${default_tasks}}"  # 所有进程规模使用同一任务数。
+TASK_CUT_GROWTH="${TASK_CUT_GROWTH:-0.10}"  # 跨节点粗面切分相对固定分配最多增加 10%。
 PROCESS_COUNTS="${PROCESS_COUNTS:-${default_process_counts}}"
 ALGORITHMS="${ALGORITHMS:-${default_algorithms}}"
 TIMING_MODES="${TIMING_MODES:-${default_timings}}"
@@ -97,7 +98,13 @@ export BALANCE_SWEEPS CUT_GROWTH COST_WEIGHTS TIMEOUT_SECONDS START_DELAY_SECOND
 export PARTITION SBATCH_COMMAND SBATCH_EXTRA_ARGS MPI_LAUNCHER MPI_EXTRA_ARGS DRY_RUN INPUT_PATH
 export EXPERIMENT_STAGE CALIBRATION_ROOT MIN_GAIN_SECONDS MIN_GAIN_FRACTION CLOSURE_GROWTH
 export PARTITION_SEEDS SEARCH_SECONDS
-export PARTITION_VARIANT PLACEMENT_ROTATION BALANCE_METHOD
+if [[ "${BALANCE_METHOD}" == task_queue ]]; then
+    [[ "${EXPERIMENT_STAGE}" == evaluation && "${TASK_COUNT}" =~ ^[1-9][0-9]*$ ]] || {
+        echo "任务调度使用 evaluation，TASK_COUNT 为正整数。" >&2;exit 2;
+    }
+    PLACEMENT_ROTATION=0
+fi
+export PARTITION_VARIANT PLACEMENT_ROTATION BALANCE_METHOD TASK_COUNT TASK_CUT_GROWTH
 
 # 登录节点：转入提交驱动；计算作业：继续执行下方 worker（工作进程）逻辑。
 if [[ "${MESH_EXPERIMENT_WORKER:-0}" != 1 ]]; then
@@ -146,7 +153,7 @@ if [[ "${EXPERIMENT_STAGE}" == evaluation && "${BALANCE_METHOD}" == node_mapping
         echo "节点映射本轮固定使用留出分区 41；-1/17 已用于训练。" >&2;exit 2;
     }
 fi
-[[ "${BALANCE_METHOD}" == node_mapping || "${BALANCE_METHOD}" == boundary ]] || exit 2
+[[ "${BALANCE_METHOD}" == node_mapping || "${BALANCE_METHOD}" == boundary || "${BALANCE_METHOD}" == task_queue ]] || exit 2
 read -r -a mpi_extra <<< "${MPI_EXTRA_ARGS}"
 for a in "${algorithms[@]}"; do
     case "$a" in baseline|balance|sparse|combined) ;; *) echo "Unknown algorithm: $a" >&2; exit 2;; esac
@@ -166,6 +173,7 @@ done
 binary_error=""
 markers=("--profile-core-only" "--algorithm" "research_1" "global_id_bits" "mesh_phase_v3")
 [[ "${EXPERIMENT_STAGE}" == legacy ]] || markers+=("partition_sampling_v1" "--preflight-parts")
+[[ "${BALANCE_METHOD}" != task_queue ]] || markers+=("mesh_tasks_v1" "--mesh-tasks")
 ((resource_evaluation==0)) || markers+=("mesh_resource_v1" "--rank-capacities")
 for marker in "${markers[@]}"; do
     if ! LC_ALL=C grep -aFq -- "${marker}" "${BINARY}"; then
@@ -202,7 +210,7 @@ if ((resource_evaluation)); then
     export MESH_MODEL_SHA256="$(sha256sum "${model}" | cut -d ' ' -f1)"
     model_args=(--resource-model "${model}" --min-gain-seconds "${MIN_GAIN_SECONDS}"
                 --min-gain-fraction "${MIN_GAIN_FRACTION}")
-elif [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
+elif [[ "${EXPERIMENT_STAGE}" == evaluation && "${BALANCE_METHOD}" != task_queue ]]; then
     model="${RUN_ROOT}/models/p${PROCESS_COUNT}.model"
     python3 "${SCRIPT_DIR}/fit_cost_model.py" --verify "${model}" --levels "${LEVELS}" --refines "${REFINES}" \
         --target-ranks "${PROCESS_COUNT}" --input-sha "${MESH_INPUT_SHA256}" --binary-sha "${MESH_BINARY_SHA256}" \
@@ -233,6 +241,10 @@ common=(-i "${INPUT_PATH}" -l "${LEVELS}" -r "${REFINES}" --maxh "${MAXH}" --min
         --balance-sweeps "${BALANCE_SWEEPS:-4}" --cut-growth "${CUT_GROWTH:-0.05}" --cost-weights "${COST_WEIGHTS:-1,1,1,1}"
         --partition-variant "${PARTITION_VARIANT}"
         "${model_args[@]}")
+if [[ "${BALANCE_METHOD}" == task_queue ]]; then
+    (( PROCESS_COUNT>=2 && TASK_COUNT>=PROCESS_COUNT-1 )) || { echo "TASK_COUNT 必须不少于进程数减一。" >&2;exit 2; }
+    common+=(--mesh-tasks "${TASK_COUNT}" --task-cut-growth "${TASK_CUT_GROWTH}")
+fi
 config_text="$(printf '%s\n' "${PROCESS_COUNT}" "${ALGORITHMS}" "${TIMING_MODES}" "${REPEATS}" "${WARMUPS}" "${common[@]}" "PARTITION_SEEDS=${PARTITION_SEEDS}" "PLACEMENT_ROTATION=${PLACEMENT_ROTATION}" "RANKS_PER_NODE=${RANKS_PER_NODE}" "SOURCE_REVISION=${MESH_SOURCE_REVISION}" "OMP_NUM_THREADS=${OMP_NUM_THREADS}" "EXPERIMENT_STAGE=${EXPERIMENT_STAGE}" "MODEL_SHA256=${MESH_MODEL_SHA256}"; sha256sum "${BINARY}" "${INPUT_PATH}")"
 if [[ -f "${pdir}/configuration.txt" && "$(cat "${pdir}/configuration.txt")" != "${config_text}" ]]; then
     echo "Existing results use another configuration; choose a new RUN_ROOT." >&2
@@ -250,7 +262,7 @@ preflight_failed() {
     cat "${pdir}/RESULT_SUMMARY.txt" >&2
     exit 2
 }
-if [[ "${EXPERIMENT_STAGE}" != legacy ]]; then
+if [[ "${EXPERIMENT_STAGE}" != legacy && "${BALANCE_METHOD}" != task_queue ]]; then
     mkdir -p "${preflight}"
     preflight_check=(--levels "${LEVELS}" --refines "${REFINES}" --target-ranks "${PROCESS_COUNT}"
         --input-sha "${MESH_INPUT_SHA256}" --binary-sha "${MESH_BINARY_SHA256}"
@@ -340,7 +352,7 @@ for ((rep=1-WARMUPS;rep<=REPEATS;++rep)); do
   for ((s=0;s<${#seeds[@]};++s)); do
     seed="${seeds[$(( (s+rep+WARMUPS-1)%${#seeds[@]} ))]}"
     reference_args=()
-    if [[ "${EXPERIMENT_STAGE}" != legacy ]]; then
+    if [[ "${EXPERIMENT_STAGE}" != legacy && "${BALANCE_METHOD}" != task_queue ]]; then
         reference_args=(--partition-reference "${preflight}/seed_${seed}.labels")
         export MESH_PARTITION_SIGNATURE="$(python3 - "${preflight}/manifest.json" "${seed}" <<'SIGNATURE'
 import json,sys

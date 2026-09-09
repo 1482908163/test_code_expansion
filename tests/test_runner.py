@@ -58,7 +58,7 @@ out=pathlib.Path(value('--profile-dir'))
         ALGORITHMS='baseline sparse', TIMING_MODES='natural', REPEATS='1', WARMUPS='1',
         MPI_LAUNCHER=str(launcher), MPI_EXTRA_ARGS=' ', START_EPOCH='0', VERIFY_FACES='0',
         RANKS_PER_NODE='1', TIMEOUT_SECONDS='10', CLEANUP_RESULTS='1',
-        MESH_EXPERIMENT_WORKER='1',PARTITION_SEEDS='-1',EXPERIMENT_STAGE='legacy')
+        MESH_EXPERIMENT_WORKER='1',PARTITION_SEEDS='-1',EXPERIMENT_STAGE='legacy',BALANCE_METHOD='boundary')
     # Reproduce yhbatch: execute a copy named slurm_script outside the source
     # tree while STRONG_SCALING_DIR points back to the real companion scripts.
     spooled=tmp/'slurm_script'
@@ -411,6 +411,22 @@ for logical in range(p):
 (pathlib.Path(value('--profile-dir'))/'rank_profiles.jsonl').write_text(''.join(json.dumps(r)+'\\n' for r in rows))
 # --algorithm research_1 global_id_bits mesh_resource_v1 --rank-capacities
 ''')
+    # 同一临时程序也模拟任务模式；断言不会调用历史预检、拟合或参考预热。
+    task_mock=modern.read_text().replace("metadata={k:os.environ[k]", "metadata={k:os.environ.get(k,'none')")
+    task_mock=task_mock.replace("rows=[]", """if '--mesh-tasks' in args:
+    metadata.update(feature_schema='mesh_tasks_v1',sampling_protocol='fixed_tasks',balance_method='task_queue',
+                    mesh_tasks=value('--mesh-tasks'),active_workers=str(p-1),task_mesh_signature='abcd')
+rows=[]""")
+    task_mock=task_mock.replace("    rows.append(dict(rank=rank", """    if '--mesh-tasks' in args:
+        total=int(value('--mesh-tasks'));completed=0 if rank==0 else total//(p-1)+(rank<=total%(p-1))
+        metrics.update(tasks_completed=completed,task_generated_elements_global=total,
+                       task_cross_node_faces_before=10,task_cross_node_faces_after=10,
+                       task_cross_node_faces_limit=11,task_moved_between_nodes=0,
+                       local_volume_elements_before_adjacency=completed*8**int(value('-r')))
+        for stage in ['part_face_create','surface_refine','local_volume_mesh']:
+            stages[stage]=dict(seconds=.1*completed,calls=completed)
+    rows.append(dict(rank=rank""")
+    modern.write_text(task_mock+"\n# mesh_tasks_v1 --mesh-tasks\n")
     modern.chmod(0o755)
     calibration=dict(env,EXPERIMENT_STAGE='calibration',PROCESS_COUNT='3',RANKS_PER_NODE='1',
         REPEATS='3',WARMUPS='1',ALGORITHMS='sparse',PARTITION_SEEDS='-1 17 41',
@@ -466,4 +482,30 @@ for logical in range(p):
         writer=csv.DictWriter(stream,fieldnames=list(source_rows[0]));writer.writeheader();writer.writerows(source_rows)
     resource.train(tmp/'modern_results',tmp/'holdout_poison',3,3,3,1)
     assert (tmp/'holdout_poison/p3.mapping').read_bytes()==model_a
+    task_env=dict(env,EXPERIMENT_STAGE='evaluation',BALANCE_METHOD='task_queue',PROCESS_COUNT='3',
+        RANKS_PER_NODE='1',TASK_COUNT='8',TASK_CUT_GROWTH='0.10',REPEATS='1',WARMUPS='1',
+        PARTITION_SEEDS='41',ALGORITHMS='baseline balance sparse combined',TIMING_MODES='natural split',
+        RUN_ROOT=str(tmp/'task_results'),BINARY=str(modern),MOCK_AUDIT=str(tmp/'task_audit'))
+    task_run=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=task_env,capture_output=True,text=True)
+    assert task_run.returncode==0,(task_run.stdout,task_run.stderr)
+    task_p=tmp/'task_results/p3'
+    assert not (task_p/'partition_preflight').exists() and not (task_p/'capacity_warmup').exists()
+    assert not (task_p/'analysis/model_samples.csv.gz').exists()
+    assert not (task_p/'analysis/issues.txt').read_text()
+    assert len((tmp/'task_audit').read_text().splitlines())==16
+    assert all(line.startswith('fine 41 ') and line.endswith(' 0') for line in (tmp/'task_audit').read_text().splitlines())
+    task_resume=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=task_env,capture_output=True,text=True)
+    assert task_resume.returncode==0 and len((tmp/'task_audit').read_text().splitlines())==16
+    task_submit=dict(submit_base,EXPERIMENT_STAGE='evaluation',BALANCE_METHOD='task_queue',TASK_COUNT='128',
+                     PROCESS_COUNTS='16 32 64',CALIBRATION_ROOT='/does/not/exist',RUN_ROOT=str(tmp/'task_submit'))
+    submitted=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=task_submit,capture_output=True,text=True)
+    assert submitted.returncode==0 and submitted.stdout.count('yhbatch')==3,submitted.stderr
+    assert not (tmp/'task_submit/models').exists()
+    profile_file=next(task_p.glob('combined*natural/repeat_1/rank_profiles.jsonl.gz'))
+    with gzip.open(profile_file,'rt') as f:bad_rows=[json.loads(line) for line in f]
+    for row in bad_rows:row['metadata']['task_mesh_signature']='bad'
+    with gzip.open(profile_file,'wt') as f:f.write(''.join(json.dumps(row)+'\n' for row in bad_rows))
+    analyzed=subprocess.run(analyzer+[str(task_p)],capture_output=True,text=True)
+    assert '任务网格不一致' in (task_p/'analysis/issues.txt').read_text(),analyzed.stderr
+    assert '不完整，不可直接比较' in (task_p/'RESULT_SUMMARY.txt').read_text()
 print('PASS: Slurm spool path, failure continuation, warmup filtering, compressed resume, lossless analysis, cleanup opt-out, failure/active/symlink protection, configuration guard')

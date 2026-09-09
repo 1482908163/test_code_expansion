@@ -1,4 +1,5 @@
 #include "partition_cost.h"
+#include "task_schedule.h"
 #include "partition_sampling.h"
 #include "resource_mapping.h"
 #include <cassert>
@@ -11,6 +12,32 @@ static double max_work(const std::vector<PartCost> &s,const CostConfig &cfg) {
 }
 static void close(double a,double b) {assert(std::abs(a-b)<1e-8*std::max(1.0,std::abs(a)));}
 int main() {
+    // 覆盖多种请求顺序：每任务恰好一次，静态归属不变，动态切分预算逐步成立。
+    for(bool dynamic:{false,true})for(int seed=0;seed<40;++seed) {
+        std::mt19937 requests(seed);
+        const int k=130,p=7;
+        std::vector<int> homes(k),nodes={0,0,0,3,3,5,5};
+        std::vector<double> weights(k);std::vector<std::map<int,int>> edges(k);
+        for(int t=0;t<k;++t) {
+            homes[t]=1+t*(p-1)/k;weights[t]=1+requests()%20;
+            if(t){edges[t][t-1]=1;edges[t-1][t]=1;}
+        }
+        TaskSchedule schedule(homes,nodes,edges,weights,seed%2?0:0.25);
+        std::vector<int> active={1,2,3,4,5,6};std::set<int> seen;
+        while(!active.empty()) {
+            const int index=requests()%active.size(),worker=active[index];
+            const int task=schedule.claim(worker,dynamic);
+            if(task<0){active.erase(active.begin()+index);continue;}
+            assert(seen.insert(task).second);
+            if(!dynamic)assert(homes[task]==worker);
+            long long actual=0;
+            for(int t=1;t<k;++t)actual+=nodes[schedule.owners()[t]]!=nodes[schedule.owners()[t-1]];
+            assert(actual==schedule.cut() && actual<=schedule.limit());
+        }
+        assert(schedule.empty() && seen.size()==k);
+    }
+    try {TaskSchedule invalid({1},{},{},{},0);assert(false);}catch(const std::runtime_error &){}
+
     // 节点组瓶颈配对：与全部节点排列穷举对照，覆盖带轮换的基线。
     for(int trial=0;trial<40;++trial) {
         std::vector<double> work={1.+trial%5,3.,8.,2.,4.,7.,6.,5.};

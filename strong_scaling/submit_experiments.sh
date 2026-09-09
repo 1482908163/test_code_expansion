@@ -23,7 +23,12 @@ read -r -a batch_extra <<< "${SBATCH_EXTRA_ARGS:-}"
 ((${#counts[@]}>0)) || exit 2
 for p in "${counts[@]}"; do [[ "${p}" =~ ^[1-9][0-9]*$ ]] || exit 2; done
 mkdir -p "${RUN_ROOT}"
-if [[ "${EXPERIMENT_STAGE}" == evaluation ]]; then
+if [[ "${BALANCE_METHOD}" == task_queue ]]; then
+    for p in "${counts[@]}"; do
+        (( p>=2 && TASK_COUNT>=p-1 )) || { echo "任务数须不少于进程数减一，且至少两进程。" >&2;exit 2; }
+    done
+fi
+if [[ "${EXPERIMENT_STAGE}" == evaluation && "${BALANCE_METHOD}" != task_queue ]]; then
     [[ -n "${CALIBRATION_ROOT}" && -d "${CALIBRATION_ROOT}" ]] || {
         echo "Set CALIBRATION_ROOT in run_experiments.sh to the completed v3 multi-seed calibration directory." >&2
         exit 2
