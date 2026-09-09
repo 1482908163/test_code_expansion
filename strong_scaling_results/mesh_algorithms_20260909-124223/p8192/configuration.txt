@@ -1,0 +1,37 @@
+8192
+baseline balance sparse combined
+natural split
+5
+1
+-i
+/vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
+-l
+3
+-r
+3
+--maxh
+1000
+--minh
+0
+-adj
+--balance-sweeps
+4
+--cut-growth
+0.05
+--cost-weights
+1,1,1,1
+--partition-variant
+cell_order_v1
+--mesh-tasks
+16384
+--task-cut-growth
+0.10
+PARTITION_SEEDS=41
+PLACEMENT_ROTATION=0
+RANKS_PER_NODE=16
+SOURCE_REVISION=787de00e419df39ebc268b1c3969e577a0a54a24
+OMP_NUM_THREADS=1
+EXPERIMENT_STAGE=evaluation
+MODEL_SHA256=none
+f6a182604aa938aa79b3a7f31d8bc1d14019732a13bafa2662fe2d90839274fb  /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/build/mesh_occ_mpi/mesh_occ_mpi
+8193db1235a9d0dc24d19dd3b9a4dafccfe62d6667ab5a395f72b30a02339547  /vol8/home/hnu_lhz/cjz/NETGEN/test_code_expansion/inputData/wholewall3solid.STEP
