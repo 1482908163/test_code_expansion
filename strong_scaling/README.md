@@ -4,18 +4,18 @@
 
 第一轮完成：稀疏通信显著降低通信开销，旧均衡模型尚无稳定净收益。见 [第一轮归档](../docs/experiments/20260906_first_run.md)。
 第二轮 v2 校准已经完成；尾部预测不足的分析见 [校准结果](../docs/experiments/20260907_calibration.md)。随后 v3 的36次正式采样也已完成，但三个种子的分区特征重复，不能进入评价，见 [v3 实验分析](../docs/experiments/20260907_v3_calibration.md)。
-第四次四组评价已经完成：160次正式运行成功，稀疏通信收益得到再次验证，但节点组映射没有兑现预测中的显著净收益。8192进程组合相对仅稀疏自然核心仅下降1.44%，屏障拆分模式略慢。原因与后续主线见 [第四次实验结果](../docs/experiments/20260908_iteration4_results.md)。本次已接入面依赖约束的封闭子域任务调度，方法与判据见 [任务调度版本](../docs/experiments/20260909_task_scheduling.md)。任务版160次正式运行已完成：仅8192进程动态调度改善8.85%，其余规模退化，且整体慢于旧稀疏流程；详见 [任务实验及初始版本对照](../docs/experiments/20260909_task_results.md)。当前默认任务版保留以供复现，不代表推荐性能最优版本。
+第四次四组评价已经完成：160次正式运行成功，稀疏通信收益得到再次验证，但节点组映射没有兑现预测中的显著净收益。8192进程组合相对仅稀疏自然核心仅下降1.44%，屏障拆分模式略慢。原因与后续主线见 [第四次实验结果](../docs/experiments/20260908_iteration4_results.md)。本次已接入面依赖约束的封闭子域任务调度，方法与判据见 [任务调度版本](../docs/experiments/20260909_task_scheduling.md)。任务版160次正式运行已完成：仅8192进程动态调度改善8.85%，其余规模退化，且整体慢于旧稀疏流程；详见 [任务实验及初始版本对照](../docs/experiments/20260909_task_results.md)。任务版已退出默认配置。当前固化一进程一分区的通信基线，停止继续调整失败的均衡方案；见 [固化说明与替代算法研究](../docs/experiments/20260909_sparse_baseline_and_new_directions.md)。
 
-## 四组消融
+## 当前通信对照
 
-| ALGORITHMS（算法列表）取值 | 封闭子域分配 | 面交换 |
+| ALGORITHMS 取值 | 局部建网 | 面交换 |
 |---|---|---|
-| `baseline`（静态任务对照） | 固定归属 | 全收集 |
-| `balance`（仅均衡） | 面依赖预算下按需领取 | 全收集 |
-| `sparse`（仅稀疏通信） | 固定归属 | 面匹配与顶点依赖闭包 |
-| `combined`（组合） | 面依赖预算下按需领取 | 面匹配与顶点依赖闭包 |
+| `baseline` | 一进程一个分区，P 个计算进程 | 全局全收集 |
+| `sparse` | 相同初始划分与建网流程 | 已验证的面匹配与顶点依赖稀疏交换 |
 
-四组固定相同任务划分，均使用 1 个队列管理进程和 P−1 个计算进程。这里的 baseline 是新的静态任务对照，不等于历史“一进程一分区”的原算法。主程序未传任务参数时仍可运行历史路径。
+默认阶段为 `communication`，方法为 `none`。程序使用 `--communication-only`，绕过任务构造、均衡特征与修正、节点映射和模型统计分发。稀疏协议本身不变。`balance/combined` 在通信阶段会被拒绝，防止旧环境变量意外重新启用失败方案。
+
+历史四组任务对照仅供复现：需同时显式选择 `evaluation` 与 `task_queue`；其 baseline 是 P−1 工作者的静态任务版本，与当前 baseline 含义不同。历史入口不作为推荐方案。
 
 ## 构建与小规模正确性检查
 
@@ -34,7 +34,7 @@ TEST_PROCESS_COUNTS='1 2 3 4 8' bash tests/run_tests.sh
 mkdir -p result/check_sparse
 yhrun --mpi=pmix -n 16 ./build/mesh_occ_mpi/mesh_occ_mpi \
   -i inputData/wholewall3solid.STEP -l 1 -r 1 -adj -v \
-  --algorithm sparse --verify-faces -o result/check_sparse/
+  --communication-only --algorithm sparse --verify-faces -o result/check_sparse/
 ```
 
 `--verify-faces` 会实际运行原全收集作为参考，逐项比较面记录及共享顶点/边/面的进程集合；因此仅用于小规模验证，不能和性能采集同时使用。该检查通过后仍需比较完整输出。均衡方案另检查几何边界、单元规模和网格质量。
@@ -56,34 +56,35 @@ bash strong_scaling/run_experiments.sh
 当前保留用户正式规模默认值 `EXPERIMENT_PRESET=production`：1024、2048、4096、8192进程，对应64、128、256、512节点，L=R=3。
 若需要先预检，在配置区改为 `pilot`：16、32、64进程，对应1、2、4节点，L=R=1，并执行稀疏面正确性核对。
 
-本次先运行 `bash build_project.sh` 重新构建，再执行统一入口。默认 `EXPERIMENT_STAGE=evaluation`、`BALANCE_METHOD=task_queue`，不读取校准目录，不拟合模型，不运行分区离线预检或额外全尺寸参考预热。
+本次先运行 `bash build_project.sh` 重新构建，再执行统一入口。默认 `EXPERIMENT_STAGE=communication`、`BALANCE_METHOD=none`，不读取校准目录，不拟合模型，不运行分区离线预检或额外全尺寸参考预热。
 
-| 设置 | 本轮生产评价 |
+| 设置 | 当前通信基线 |
 |---|---|
 | 进程 / 节点 | 1024/2048/4096/8192；64/128/256/512 |
-| 逻辑任务数 TASK_COUNT | 所有规模固定 16384；pilot 为128 |
-| 计算进程数 | 每作业 P−1；rank 0 管理队列，计入总资源 |
-| 固定分区种子 | 41 |
-| 跨节点粗面增长预算 TASK_CUT_GROWTH | 0.10，相对静态初始计划 |
-| 算法 / 计时 | 四组消融；natural、split |
+| 局部子域 / 计算进程 | 每规模均为 P；没有队列管理专用进程 |
+| 分区方式 / 种子 / 映射 | `metis_seed` / -1（原库默认）/ 不轮换 |
+| 表面 / 体细化 | L=3 / R=3；粗网格生成不变 |
+| 算法 / 计时 | baseline、sparse；natural、split |
 | 每组常规预热 / 正式 | 1 / 5 |
-| 全部正式 / 常规预热次数 | 160 / 32 |
+| 全部正式 / 常规预热次数 | 80 / 16 |
 | 额外参考预热 / 离线拟合 | 0 / 0 |
 | 作业 | 4个并行提交，统一最早开始时间 |
 
-任务数必须不小于 P−1 且不大于粗网格单元数；粗网格生成方式不变。实际细网格规模须以运行输出为准，不能预先假定等于历史实验。任务划分及生成网格签名、合并后单元守恒由运行/分析流程检查；不一致的结果标为不可直接比较。常规冷启动预热仍保留，不参与正式中位数。
+历史同参数网格约24.13—32.26亿体单元；新运行以实际输出为准。跨规模单元数不同，不能称为固定工作量的严格强扩展。比较稀疏收益应首先比较同规模、同输入、同细化参数的 baseline/sparse，检查生成单元及边界一致性。核心时间直接测量粗网格后至邻接交换完成的区间；常规预热不参与正式中位数。
 
 `submit_suite.sh`（套件提交入口）仍可作为同一脚本的兼容入口。
 
 - `natural`（自然运行）：用于性能对比；集合调用内可能含到达等待。
-- `split`（等待/执行拆分）：四组一致添加前置屏障，用于归因；不能与自然运行数据混合。
+- `split`（等待/执行拆分）：同批两组一致添加前置屏障，用于归因；不能与自然运行数据混合。
 - 正式重复默认校准3次、评价5次；每种子每组预热1次，编号为0，不计入汇总。
 - 不需要设置原来的 `CORE_ONLY`、`CACHE_COUNTERS` 或 `EXPERIMENT`（核心开关、缓存计数、实验名称）。新运行器始终采集核心阶段。
 - 每个进程规模独立提交，统一最早启动时刻；没有作业串行依赖。相同规模内按轮次轮换算法顺序。
 - 失败运行记录退出码，并继续后面的算法/重复；作业结束仍返回失败状态。在同一节点分配内再次使用相同 `RUN_ROOT`（结果目录）会跳过成功运行、重试失败运行；换节点分配请使用新目录，避免混用不同资源条件。
 - 更改二进制、输入、算法列表、重复次数或模型参数时，选择新结果目录；脚本不把旧配置结果混入新实验。
 
-配置区还可以直接修改：`ALGORITHMS`（算法列表）、`TIMING_MODES`（计时模式）、`PARTITION_SEEDS`（分区种子）、`PARTITION_VARIANT`（采样方式）、`PLACEMENT_ROTATION`（节点轮换）、`REPEATS`（正式次数）、`WARMUPS`（预热次数）、`SEARCH_SECONDS`（搜索软预算）、`BALANCE_SWEEPS`（修正轮数）、`CUT_GROWTH`（切分面增长上限）、`COST_WEIGHTS`（代理权重）、启动延时、超时和 `DRY_RUN`（仅打印提交命令）。本轮优先修改 TASK_COUNT（固定任务数）和 TASK_CUT_GROWTH（面依赖预算）；SEARCH_SECONDS/BALANCE_SWEEPS等仅用于历史边界方法。第三次校准模式要求至少3组不同分区、每组至少3次正式重复并开启轮换；不要关闭检查来强行接受旧数据。
+配置区常用项：`EXPERIMENT_PRESET`、`PROCESS_COUNTS`、`RANKS_PER_NODE`、`LEVELS`、`REFINES`、`ALGORITHMS`、`TIMING_MODES`、`REPEATS`、`WARMUPS`、启动延时和超时。通常只需在文件内修改，不必在命令行传环境变量。
+
+`TASK_COUNT/TASK_CUT_GROWTH`、模型、修正轮数和候选搜索预算仅供历史模式，当前通信基线不使用。第三次校准等历史约束详见对应研究记录。
 
 ## 结果自动清理
 
@@ -104,7 +105,7 @@ python3 strong_scaling/analyze_results.py /完整实验结果目录 --keep-artif
 
 每个进程规模目录（如 `p1024/`）优先只看以下文件：
 
-1. `RESULT_SUMMARY.txt`：第一入口，显示完整性、核心时间、真实计算最大值、面通信，以及任务等待、领取和合并开销。历史方法的额外诊断仅在对应模式显示。
+1. `RESULT_SUMMARY.txt`：第一入口，显示完整性、核心时间、真实计算最大值和面通信；任务等待、领取及合并等历史诊断仅在相应模式显示。
 2. `analysis/summary.csv`：论文作图与算法比较使用的重复实验中位数。
 3. `analysis/issues.txt`：仅当总览中的异常项不为 0 时查看。
 4. `repeat_*/run.log.gz`：仅在排查某一次失败时查看，不参与日常结果阅读。

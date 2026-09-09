@@ -17,6 +17,7 @@ struct ResearchOptions {
     int rank_shift = 0, preflight_parts = 0;
     int mesh_tasks = 0; // 0 保留历史单分区路径。
     double task_cut_growth = 0.10;
+    bool communication_only = false; // 固化通信基线，绕过历史均衡和模型。
     bool verify_faces = false;
     bool sparse() const { return algorithm == "sparse" || algorithm == "combined"; }
     bool balance() const { return algorithm == "balance" || algorithm == "combined"; }

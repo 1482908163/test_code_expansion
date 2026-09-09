@@ -426,8 +426,36 @@ rows=[]""")
         for stage in ['part_face_create','surface_refine','local_volume_mesh']:
             stages[stage]=dict(seconds=.1*completed,calls=completed)
     rows.append(dict(rank=rank""")
-    modern.write_text(task_mock+"\n# mesh_tasks_v1 --mesh-tasks\n")
+    task_mock=task_mock.replace("rows=[]", """if '--communication-only' in args:
+    assert not any(flag in args for flag in ['--mesh-tasks','--phase-model','--resource-model',
+        '--rank-capacities','--partition-reference','--preflight-parts','--balance-sweeps'])
+    assert shift==0 and value('--algorithm') in ('baseline','sparse')
+    metadata.update(feature_schema='mesh_comm_v1',sampling_protocol='communication_baseline_v1',
+        balance_method='none',cost_model='none',mesh_tasks='0',active_workers=str(p))
+rows=[]""")
+    modern.write_text(task_mock+"\n# mesh_tasks_v1 --mesh-tasks mesh_comm_v1 --communication-only\n")
     modern.chmod(0o755)
+    # 通信默认路径：同一入口、无模型/任务、压缩后续跑仍识别成功结果。
+    communication=dict(env,EXPERIMENT_STAGE='communication',BALANCE_METHOD='none',PROCESS_COUNT='3',
+        RANKS_PER_NODE='1',REPEATS='1',WARMUPS='1',ALGORITHMS='baseline sparse',TIMING_MODES='natural split',
+        PARTITION_SEEDS='-1',CALIBRATION_ROOT='/does/not/exist',
+        RUN_ROOT=str(tmp/'communication_results'),BINARY=str(modern),MOCK_AUDIT=str(tmp/'communication_audit'))
+    comm_run=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=communication,
+                            capture_output=True,text=True)
+    assert comm_run.returncode==0,(comm_run.stdout,comm_run.stderr)
+    comm_dir=tmp/'communication_results/p3'
+    assert not (comm_dir/'partition_preflight').exists() and not (comm_dir/'capacity_warmup').exists()
+    assert not (comm_dir/'analysis/model_samples.csv.gz').exists()
+    assert not (comm_dir/'analysis/issues.txt').read_text()
+    assert len(list(csv.DictReader((comm_dir/'analysis/runs.csv').open())))==4
+    assert len((tmp/'communication_audit').read_text().splitlines())==8
+    comm_resume=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=communication,
+                               capture_output=True,text=True)
+    assert comm_resume.returncode==0,(comm_resume.stdout,comm_resume.stderr)
+    assert len((tmp/'communication_audit').read_text().splitlines())==8
+    invalid_comm=dict(communication,ALGORITHMS='combined',RUN_ROOT=str(tmp/'invalid_comm'))
+    rejected=subprocess.run(['bash',str(ROOT/'strong_scaling/run_experiments.sh')],env=invalid_comm,capture_output=True,text=True)
+    assert rejected.returncode==2 and not (tmp/'invalid_comm').exists()
     calibration=dict(env,EXPERIMENT_STAGE='calibration',PROCESS_COUNT='3',RANKS_PER_NODE='1',
         REPEATS='3',WARMUPS='1',ALGORITHMS='sparse',PARTITION_SEEDS='-1 17 41',
         RUN_ROOT=str(tmp/'modern_results'),BINARY=str(modern),MOCK_AUDIT=str(tmp/'modern_audit'))

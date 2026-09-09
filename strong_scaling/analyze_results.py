@@ -179,6 +179,18 @@ def inspect(path, sample_sink=None):
                   cut_before=max(r["metrics"].get("partition_cut_before", 0) for r in rows),
                   cut_after=max(r["metrics"].get("partition_cut_after", 0) for r in rows),
                   partition_moves=max(r["metrics"].get("partition_moves", 0) for r in rows))
+    if metadata.get("feature_schema")=="mesh_comm_v1":
+        if (metadata["algorithm"] not in ("baseline","sparse") or
+            metadata.get("cost_model")!="none" or metadata.get("balance_method")!="none" or
+            int(metadata.get("mesh_tasks",-1))!=0 or int(metadata.get("active_workers",0))!=n):
+            raise ValueError("invalid communication baseline configuration")
+        for r in rows:
+            if any(r["stages"].get(s,{}).get("calls",0)!=1 for s in COMPUTE) or r["metrics"].get("local_volume_elements_before_adjacency",0)<=0:
+                raise ValueError("communication baseline requires one complete local mesh per rank")
+            if any(s.startswith(("task_","partition_cost_","partition_node_mapping")) for s in r["stages"]):
+                raise ValueError("historical balancing entered communication baseline")
+        result.update(compute_max_seconds=max(compute),compute_mean_seconds=mean(compute),
+                      vertex_wait_mean_seconds=mean(waiting) if split else None)
     if metadata.get("feature_schema") in ("mesh_phase_v2", "mesh_phase_v3"):
         # Validate even during --finish-run, before SUCCESS is written.
         samples=[]
@@ -469,7 +481,7 @@ def main():
     write_csv(output/"summary.csv", summaries)
     (output/"issues.txt").write_text("\n".join(errors)+( "\n" if errors else ""))
     sample_stream.close()
-    if any("compute_max_seconds" in r and "task_count" not in r for r in runs):
+    if any("phase_0_max_seconds" in r for r in runs):
         os.replace(sample_tmp,output/"model_samples.csv.gz")
     else:
         sample_tmp.unlink()

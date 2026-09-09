@@ -15,16 +15,22 @@ export STRONG_SCALING_DIR="${SCRIPT_DIR}"
 # 环境变量仍可覆盖这些默认值，主要供作业脚本内部传递及断点续跑使用。
 # ============================================================================
 EXPERIMENT_PRESET="${EXPERIMENT_PRESET:-production}"
-# 本轮默认任务调度：固定封闭子域、按需领取，不训练模型或额外参考预热。
-# boundary / node_mapping 仅保留历史实验的复现入口。
-EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-evaluation}"
-BALANCE_METHOD="${BALANCE_METHOD:-task_queue}"
+# 当前默认：一进程一分区，只比较全收集和已验证的稀疏通信。
+# boundary / node_mapping / task_queue 仅供显式复现历史失败方案。
+EXPERIMENT_STAGE="${EXPERIMENT_STAGE:-communication}"
+BALANCE_METHOD="${BALANCE_METHOD:-none}"
 CALIBRATION_ROOT="${CALIBRATION_ROOT:-${SCRIPT_DIR}/../strong_scaling_results/mesh_algorithms_20260908-135236}"
 MIN_GAIN_SECONDS="${MIN_GAIN_SECONDS:-0.35}"
 MIN_GAIN_FRACTION="${MIN_GAIN_FRACTION:-0.05}"
 CLOSURE_GROWTH="${CLOSURE_GROWTH:-0}"
 SEARCH_SECONDS="${SEARCH_SECONDS:-0.35}"
 case "${EXPERIMENT_STAGE}" in
+    communication)
+        default_algorithms="baseline sparse"
+        default_timings="natural split"
+        default_seeds="-1"
+        default_repeats=5
+        ;;
     calibration)
         default_algorithms="sparse"
         default_timings="natural"
@@ -38,7 +44,7 @@ case "${EXPERIMENT_STAGE}" in
         [[ "${EXPERIMENT_STAGE}" == evaluation && "${BALANCE_METHOD}" != boundary ]] && default_seeds="41"
         default_repeats=5
         ;;
-    *) echo "EXPERIMENT_STAGE must be calibration, evaluation or legacy" >&2; exit 2 ;;
+    *) echo "EXPERIMENT_STAGE must be communication, calibration, evaluation or legacy" >&2; exit 2 ;;
 esac
 case "${EXPERIMENT_PRESET}" in
     pilot)
@@ -58,7 +64,7 @@ case "${EXPERIMENT_PRESET}" in
     *) echo "EXPERIMENT_PRESET must be pilot or production" >&2; exit 2 ;;
 esac
 
-TASK_COUNT="${TASK_COUNT:-${default_tasks}}"  # 所有进程规模使用同一任务数。
+TASK_COUNT="${TASK_COUNT:-${default_tasks}}"  # 仅历史 task_queue 使用；通信基线忽略。
 TASK_CUT_GROWTH="${TASK_CUT_GROWTH:-0.10}"  # 跨节点粗面切分相对固定分配最多增加 10%。
 PROCESS_COUNTS="${PROCESS_COUNTS:-${default_process_counts}}"
 ALGORITHMS="${ALGORITHMS:-${default_algorithms}}"
@@ -66,7 +72,7 @@ TIMING_MODES="${TIMING_MODES:-${default_timings}}"
 # -1 保留原输入顺序；17/41 用于固定粗单元重排，并检查实际归属确实不同。
 PARTITION_SEEDS="${PARTITION_SEEDS:-${default_seeds}}"
 default_variant=cell_order_v1
-[[ "${EXPERIMENT_STAGE}" == legacy ]] && default_variant=metis_seed
+[[ "${EXPERIMENT_STAGE}" == legacy || "${EXPERIMENT_STAGE}" == communication ]] && default_variant=metis_seed
 PARTITION_VARIANT="${PARTITION_VARIANT:-${default_variant}}"
 PLACEMENT_ROTATION="${PLACEMENT_ROTATION:-1}"
 RANKS_PER_NODE="${RANKS_PER_NODE:-16}"
@@ -98,6 +104,17 @@ export BALANCE_SWEEPS CUT_GROWTH COST_WEIGHTS TIMEOUT_SECONDS START_DELAY_SECOND
 export PARTITION SBATCH_COMMAND SBATCH_EXTRA_ARGS MPI_LAUNCHER MPI_EXTRA_ARGS DRY_RUN INPUT_PATH
 export EXPERIMENT_STAGE CALIBRATION_ROOT MIN_GAIN_SECONDS MIN_GAIN_FRACTION CLOSURE_GROWTH
 export PARTITION_SEEDS SEARCH_SECONDS
+if [[ "${EXPERIMENT_STAGE}" == communication ]]; then
+    [[ "${BALANCE_METHOD}" == none ]] || { echo "通信基线要求 BALANCE_METHOD=none。" >&2;exit 2; }
+    for algorithm in ${ALGORITHMS//,/ }; do
+        [[ "$algorithm" == baseline || "$algorithm" == sparse ]] || {
+            echo "通信基线仅允许 baseline sparse；历史均衡需显式选择 evaluation 和对应方法。" >&2;exit 2;
+        }
+    done
+    PLACEMENT_ROTATION=0
+elif [[ "${BALANCE_METHOD}" == none ]]; then
+    echo "历史实验需在统一配置区显式指定 BALANCE_METHOD。" >&2;exit 2
+fi
 if [[ "${BALANCE_METHOD}" == task_queue ]]; then
     [[ "${EXPERIMENT_STAGE}" == evaluation && "${TASK_COUNT}" =~ ^[1-9][0-9]*$ ]] || {
         echo "任务调度使用 evaluation，TASK_COUNT 为正整数。" >&2;exit 2;
@@ -153,7 +170,7 @@ if [[ "${EXPERIMENT_STAGE}" == evaluation && "${BALANCE_METHOD}" == node_mapping
         echo "节点映射本轮固定使用留出分区 41；-1/17 已用于训练。" >&2;exit 2;
     }
 fi
-[[ "${BALANCE_METHOD}" == node_mapping || "${BALANCE_METHOD}" == boundary || "${BALANCE_METHOD}" == task_queue ]] || exit 2
+[[ "${BALANCE_METHOD}" == none || "${BALANCE_METHOD}" == node_mapping || "${BALANCE_METHOD}" == boundary || "${BALANCE_METHOD}" == task_queue ]] || exit 2
 read -r -a mpi_extra <<< "${MPI_EXTRA_ARGS}"
 for a in "${algorithms[@]}"; do
     case "$a" in baseline|balance|sparse|combined) ;; *) echo "Unknown algorithm: $a" >&2; exit 2;; esac
@@ -172,7 +189,11 @@ done
 # the failure would otherwise be discovered only after many expensive runs.
 binary_error=""
 markers=("--profile-core-only" "--algorithm" "research_1" "global_id_bits" "mesh_phase_v3")
-[[ "${EXPERIMENT_STAGE}" == legacy ]] || markers+=("partition_sampling_v1" "--preflight-parts")
+if [[ "${EXPERIMENT_STAGE}" == communication ]]; then
+    markers+=("mesh_comm_v1" "--communication-only")
+else
+    [[ "${EXPERIMENT_STAGE}" == legacy ]] || markers+=("partition_sampling_v1" "--preflight-parts")
+fi
 [[ "${BALANCE_METHOD}" != task_queue ]] || markers+=("mesh_tasks_v1" "--mesh-tasks")
 ((resource_evaluation==0)) || markers+=("mesh_resource_v1" "--rank-capacities")
 for marker in "${markers[@]}"; do
@@ -238,9 +259,13 @@ case "$(basename "${MPI_LAUNCHER}")" in yhrun|srun)
     ;;
 esac
 common=(-i "${INPUT_PATH}" -l "${LEVELS}" -r "${REFINES}" --maxh "${MAXH}" --minh "${MINH}" -adj
-        --balance-sweeps "${BALANCE_SWEEPS:-4}" --cut-growth "${CUT_GROWTH:-0.05}" --cost-weights "${COST_WEIGHTS:-1,1,1,1}"
-        --partition-variant "${PARTITION_VARIANT}"
-        "${model_args[@]}")
+        --partition-variant "${PARTITION_VARIANT}")
+if [[ "${EXPERIMENT_STAGE}" == communication ]]; then
+    common+=(--communication-only)
+else
+    common+=(--balance-sweeps "${BALANCE_SWEEPS}" --cut-growth "${CUT_GROWTH}" --cost-weights "${COST_WEIGHTS}"
+             "${model_args[@]}")
+fi
 if [[ "${BALANCE_METHOD}" == task_queue ]]; then
     (( PROCESS_COUNT>=2 && TASK_COUNT>=PROCESS_COUNT-1 )) || { echo "TASK_COUNT 必须不少于进程数减一。" >&2;exit 2; }
     common+=(--mesh-tasks "${TASK_COUNT}" --task-cut-growth "${TASK_CUT_GROWTH}")
@@ -262,7 +287,7 @@ preflight_failed() {
     cat "${pdir}/RESULT_SUMMARY.txt" >&2
     exit 2
 }
-if [[ "${EXPERIMENT_STAGE}" != legacy && "${BALANCE_METHOD}" != task_queue ]]; then
+if [[ "${EXPERIMENT_STAGE}" != legacy && "${EXPERIMENT_STAGE}" != communication && "${BALANCE_METHOD}" != task_queue ]]; then
     mkdir -p "${preflight}"
     preflight_check=(--levels "${LEVELS}" --refines "${REFINES}" --target-ranks "${PROCESS_COUNT}"
         --input-sha "${MESH_INPUT_SHA256}" --binary-sha "${MESH_BINARY_SHA256}"
@@ -324,7 +349,9 @@ fi
 # Correctness checks deliberately cannot be combined with timing collection.
 if [[ "${VERIFY_FACES}" == 1 ]]; then
   for seed in "${seeds[@]}"; do
-    for a in sparse combined; do
+    verify_algorithms="sparse combined"
+    [[ "${EXPERIMENT_STAGE}" != communication ]] || verify_algorithms="sparse"
+    for a in ${verify_algorithms}; do
         checkdir="${pdir}/verify_${a}_seed${seed}"
         mkdir -p "${checkdir}"
         timeout "${TIMEOUT_SECONDS}" "${launch[@]}" "${BINARY}" "${common[@]}" \
@@ -352,7 +379,7 @@ for ((rep=1-WARMUPS;rep<=REPEATS;++rep)); do
   for ((s=0;s<${#seeds[@]};++s)); do
     seed="${seeds[$(( (s+rep+WARMUPS-1)%${#seeds[@]} ))]}"
     reference_args=()
-    if [[ "${EXPERIMENT_STAGE}" != legacy && "${BALANCE_METHOD}" != task_queue ]]; then
+    if [[ "${EXPERIMENT_STAGE}" != legacy && "${EXPERIMENT_STAGE}" != communication && "${BALANCE_METHOD}" != task_queue ]]; then
         reference_args=(--partition-reference "${preflight}/seed_${seed}.labels")
         export MESH_PARTITION_SIGNATURE="$(python3 - "${preflight}/manifest.json" "${seed}" <<'SIGNATURE'
 import json,sys

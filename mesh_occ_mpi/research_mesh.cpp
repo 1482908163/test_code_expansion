@@ -132,6 +132,31 @@ idx_t *PartitionResearchMesh(void *raw,int parts) {
     if(!labels || ne<parts || ne<=0) protocol_error(MPI_COMM_WORLD,"more partitions than coarse cells");
     std::vector<double> all_stats;
     auto &profile=scaling::Profiler::instance();
+    // 两个通信对照共用原始分区；不为未启用的均衡构建特征图或分发模型统计。
+    if(options().communication_only) {
+        if(rank==0) try {
+            if(parts>1) {
+                scaling::StageScope time("metis_seed","compute");
+                idx_t *initial=PartitionMesh(mesh,parts);
+                std::copy_n(initial,ne,labels);
+                std::free(initial);
+            } else std::fill_n(labels,ne,0);
+        } catch(const std::exception &e) {protocol_error(MPI_COMM_WORLD,e.what());}
+        if(profile.split_collectives()) {
+            scaling::StageScope wait("partition_pre_collective_wait","synchronization");
+            check_mpi(MPI_Barrier(MPI_COMM_WORLD),MPI_COMM_WORLD);
+        }
+        {
+            scaling::StageScope time("partition_distribution","communication");
+            const MPI_Datatype type=sizeof(idx_t)==4?MPI_INT32_T:MPI_INT64_T;
+            check_mpi(MPI_Bcast(labels,ne,type,0,MPI_COMM_WORLD),MPI_COMM_WORLD);
+        }
+        const std::uint64_t bytes=static_cast<std::uint64_t>(ne)*sizeof(idx_t);
+        profile.add_communication("partition_distribution",rank==0?parts-1:0,rank?1:0,
+            rank==0?(parts-1)*bytes:0,rank?bytes:0);
+        profile.set_metric("logical_partition",rank);
+        return labels;
+    }
     constexpr int stat_count=10+phase_features+phase_count;
     if(rank==0) {
         try {
